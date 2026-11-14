@@ -125,7 +125,9 @@ export default {
       const v = url.searchParams.get(k);
       if (v == null || v === '') continue;
       if (!re.test(v)) return json({ error: `bad ${k}` }, 400);
-      params[k] = k === 'code' || k === 'filterTo' || k === 'filterFrom' ? v.toUpperCase() : v;
+      params[k] = k === 'code' || k === 'filterTo' || k === 'filterFrom' ? v.toUpperCase()
+        // RTT's service lookup wants "IDENTITY:DATE" without the "gb-nr:" namespace.
+        : k === 'uniqueIdentity' ? v.split(':').slice(-2).join(':') : v;
     }
     for (const k of route.required) if (!params[k]) return json({ error: `missing ${k}` }, 400);
 

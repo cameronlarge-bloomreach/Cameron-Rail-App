@@ -335,7 +335,24 @@ async function readJobCard(file, progress) {
 }
 
 /* ---------- Finding each train in the live data ---------- */
-async function resolveLeg(leg, date) {
+// The free API allows about 10 requests a minute. Space requests out, and if
+// the limit is still hit, wait and try again rather than giving up.
+let lastApiAt = 0;
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+async function pacedApi(path, onWait) {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const wait = lastApiAt + 6500 - Date.now();
+    if (wait > 0) await sleep(wait);
+    lastApiAt = Date.now();
+    try { return await api(path); }
+    catch (err) {
+      if (!(err && err.kind === 'ratelimit') || attempt === 3) throw err;
+      if (onWait) onWait();
+      await sleep(30000);
+    }
+  }
+}
+async function resolveLeg(leg, date, onWait) {
   if (leg.uid) return leg.uid;
   const from = m => { const v = Math.max(0, Math.round(m)); return `${date}T${pad(Math.floor(v / 60) % 24)}:${pad(v % 60)}`; };
   // Look at the first stop, then the last, then one in the middle: each search
@@ -346,7 +363,7 @@ async function resolveLeg(leg, date) {
   for (const k of order) {
     const st = leg.stops[k];
     if (!st || !st.crs || !st.time) continue;
-    const data = await api(`/location?code=${encodeURIComponent(st.crs)}&timeFrom=${encodeURIComponent(from(toMins(st.time) - 20))}`);
+    const data = await pacedApi(`/location?code=${encodeURIComponent(st.crs)}&timeFrom=${encodeURIComponent(from(toMins(st.time) - 20))}`, onWait);
     const hit = ((data && data.services) || []).find(s => s.scheduleMetadata && String(s.scheduleMetadata.trainReportingIdentity || '').toUpperCase() === hc);
     if (hit) {
       leg.uid = hit.scheduleMetadata.uniqueIdentity;
@@ -413,12 +430,18 @@ function matchIndex(svc, crs, fromIdx = 0) {
 async function saveFinishedLegs(legs, quiet) {
   let saved = 0, waiting = 0, limited = false;
   const notFound = [], errored = [];
-  for (const leg of legs) {
-    if (!leg || leg.runId) continue;
+  const todo = legs.filter(l => l && !l.runId);
+  const progress = (i, msg) => {
+    const b = $('#day-save-all');
+    if (b) b.textContent = msg || `Saving ${i + 1} of ${todo.length}… (spaced out for the live-data limit)`;
+  };
+  for (const [i, leg] of todo.entries()) {
+    progress(i);
+    const onWait = () => progress(i, `Live-data limit reached. Waiting 30s, then carrying on (${i + 1} of ${todo.length})…`);
     try {
-      const uid = await resolveLeg(leg, settings.day.date);
+      const uid = await resolveLeg(leg, settings.day.date, onWait);
       if (!uid) { notFound.push(leg.headcode); continue; }
-      const svc = parseService(await api(`/service?uniqueIdentity=${encodeURIComponent(uid)}`));
+      const svc = parseService(await pacedApi(serviceQuery(uid), onWait));
       const first = leg.stops[0], last = leg.stops[leg.stops.length - 1];
       const ai = matchIndex(svc, first.crs), bi = matchIndex(svc, last.crs, Math.max(ai, 0));
       const A = ai >= 0 ? svc.locs[ai] : null, B = bi >= 0 ? svc.locs[bi] : null;
