@@ -187,6 +187,7 @@ function renderPlan(el, day) {
         <button class="btn btn-ghost" id="day-clear">Clear</button>
       </div>
     </div>
+    ${dayState.notice ? `<div class="find-status" id="day-notice">${esc(dayState.notice)} <button class="link-btn" id="day-notice-x">OK</button></div>` : ''}
     ${unsaved.length ? `<button class="btn btn-primary full" id="day-save-all">Save ${unsaved.length} finished run${unsaved.length === 1 ? '' : 's'} to stats</button>` : ''}
     <div class="dlegs">
       ${day.legs.map((leg, i) => {
@@ -220,7 +221,8 @@ function renderPlan(el, day) {
     settings.day = null; persistSettings(); renderDay();
   });
   $('#day-share').addEventListener('click', shareDay);
-  const sa = $('#day-save-all'); if (sa) sa.addEventListener('click', () => saveFinishedLegs(unsaved));
+  const sa = $('#day-save-all'); if (sa) sa.addEventListener('click', () => { dayState.notice = null; sa.disabled = true; sa.textContent = 'Saving… (finding each train)'; saveFinishedLegs(unsaved); });
+  const nx = $('#day-notice-x'); if (nx) nx.addEventListener('click', () => { dayState.notice = null; renderDay(); });
   el.querySelectorAll('.dleg-track').forEach(b => b.addEventListener('click', e => trackLeg(legById(e.target.closest('.dleg').dataset.id), true)));
   el.querySelectorAll('.dleg-save').forEach(b => b.addEventListener('click', e => saveFinishedLegs([legById(e.target.closest('.dleg').dataset.id)])));
 }
@@ -335,15 +337,17 @@ async function readJobCard(file, progress) {
 /* ---------- Finding each train in the live data ---------- */
 async function resolveLeg(leg, date) {
   if (leg.uid) return leg.uid;
-  const tries = [];
-  const first = leg.stops[0], last = leg.stops[leg.stops.length - 1];
-  const startMins = legMins(leg) ?? 0;
   const from = m => { const v = Math.max(0, Math.round(m)); return `${date}T${pad(Math.floor(v / 60) % 24)}:${pad(v % 60)}`; };
-  tries.push({ code: first.crs, timeFrom: from(startMins - 20) });
-  if (last && last.crs) tries.push({ code: last.crs, timeFrom: from((legMins(leg, 'end') ?? startMins) - 30) });
-  for (const t of tries) {
-    const data = await api(`/location?code=${encodeURIComponent(t.code)}&timeFrom=${encodeURIComponent(t.timeFrom)}`);
-    const hit = ((data && data.services) || []).find(s => s.scheduleMetadata && s.scheduleMetadata.trainReportingIdentity === leg.headcode);
+  // Look at the first stop, then the last, then one in the middle: each search
+  // covers an hour from 20 minutes before the card's time at that stop.
+  const n = leg.stops.length;
+  const order = [0, n - 1, Math.floor(n / 2)].filter((v, i, a) => a.indexOf(v) === i);
+  const hc = String(leg.headcode).toUpperCase();
+  for (const k of order) {
+    const st = leg.stops[k];
+    if (!st || !st.crs || !st.time) continue;
+    const data = await api(`/location?code=${encodeURIComponent(st.crs)}&timeFrom=${encodeURIComponent(from(toMins(st.time) - 20))}`);
+    const hit = ((data && data.services) || []).find(s => s.scheduleMetadata && String(s.scheduleMetadata.trainReportingIdentity || '').toUpperCase() === hc);
     if (hit) {
       leg.uid = hit.scheduleMetadata.uniqueIdentity;
       persistSettings();
@@ -407,12 +411,13 @@ function matchIndex(svc, crs, fromIdx = 0) {
 }
 
 async function saveFinishedLegs(legs, quiet) {
-  let saved = 0, waiting = 0, failed = 0;
+  let saved = 0, waiting = 0, limited = false;
+  const notFound = [], errored = [];
   for (const leg of legs) {
     if (!leg || leg.runId) continue;
     try {
       const uid = await resolveLeg(leg, settings.day.date);
-      if (!uid) { failed++; continue; }
+      if (!uid) { notFound.push(leg.headcode); continue; }
       const svc = parseService(await api(`/service?uniqueIdentity=${encodeURIComponent(uid)}`));
       const first = leg.stops[0], last = leg.stops[leg.stops.length - 1];
       const ai = matchIndex(svc, first.crs), bi = matchIndex(svc, last.crs, Math.max(ai, 0));
@@ -431,14 +436,28 @@ async function saveFinishedLegs(legs, quiet) {
       leg.runId = run.id;
       saved++;
     } catch (err) {
-      failed++;
-      if (err && err.kind === 'ratelimit') break;
+      if (err && err.kind === 'ratelimit') { limited = true; break; }
+      errored.push(leg.headcode);
     }
   }
   persistRuns(); persistSettings();
   if (quiet && !saved) return;
-  toast([saved ? `Saved ${saved} run${saved === 1 ? '' : 's'}` : '', waiting ? `${waiting} not arrived yet` : '', failed ? `${failed} couldn't be found` : ''].filter(Boolean).join(' · ') || 'Nothing to save');
+  const parts = [
+    saved ? `Saved ${saved} run${saved === 1 ? '' : 's'}` : '',
+    waiting ? `${waiting} not arrived yet` : '',
+    notFound.length ? `${notFound.join(', ')} not found in the live data. Check the headcode and times on the card` : '',
+    errored.length ? `${errored.join(', ')}: couldn't load, try again` : '',
+    limited ? 'Live data limit reached. Wait a minute and tap Save again to finish' : '',
+  ].filter(Boolean);
+  if (parts.length > 1 || limited || notFound.length) dayNotice(parts.join('. ') + '.');
+  else toast(parts[0] || 'Nothing to save');
   renderDay();
+}
+
+function dayNotice(msg) {
+  dayState.notice = msg;
+  if (currentView === 'day') renderDay();
+  else toast(msg);
 }
 
 /* ---------- Sharing a day between phones ---------- */
