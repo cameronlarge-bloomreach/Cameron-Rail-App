@@ -1,0 +1,16 @@
+{
+  "name": "Right Time",
+  "short_name": "Right Time",
+  "description": "Log the trains you drive and track how often you're early, on time or late.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#14365c",
+  "theme_color": "#14365c",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
