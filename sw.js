@@ -1,10 +1,13 @@
 // Offline support: cache the app shell, serve from cache, refresh in the background.
-const CACHE = 'righttime-v3';
+const CACHE = 'righttime-v4';
 const ASSETS = [
   './',
   './index.html',
   './style.css',
   './app.js',
+  './day.js',
+  './jobcard.js',
+  './jobcard-image.js',
   './manifest.webmanifest',
   './data/stations.json',
   './vendor/leaflet/leaflet.js',

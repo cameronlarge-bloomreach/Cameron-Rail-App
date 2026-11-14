@@ -15,6 +15,13 @@ It's a Progressive Web App (PWA): it installs from Safari onto the home screen, 
 - **Save run**: saves the run to her stats. If she only drove part of the train, she picks where she took over and handed over, and the times fill in.
 - **Try a demo** shows a pretend train moving, so you can see how it works before setting anything up.
 
+**My day (job card)**: photograph the job card and the app reads every train on it: the headcode in each yellow header, then each station and its working-timetable time, including ½ minutes. You check the result (anything uncertain is highlighted), then save.
+- Each train is found in the live data automatically by its headcode.
+- With **Follow my day on the map** on, the map moves to each train as the shift goes on, so it can be followed from either phone. Use **Share day** to send the whole day to the other phone.
+- When a train arrives, the run is saved to Stats automatically, using the **job card's times** as booked times. You can also tap **Save run**, or **Save finished runs**.
+- Reading happens on the phone (Tesseract OCR, in `vendor/tesseract`), so the photo is never uploaded. The first read downloads the reader (~7 MB); after that it's quick and works offline.
+- The reader is tuned for cards with yellow headcode bars. Other layouts fall back to reading the whole page; anything can be added or fixed by hand on the check screen.
+
 **Find**: search any station (name or 3-letter code), choose a date, and optionally type the headcode. Tap a train to track it.
 
 **Stats and Runs**: % early or on time, early/on-time/late counts, average, streak, most early and most late, total minutes, a chart of recent runs, reasons for being late, and how each route does. Runs can be added by hand, edited, exported (JSON backup or CSV) and restored.

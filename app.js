@@ -19,7 +19,7 @@ function save(key, value) {
 
 let runs = load(STORE_KEY, []);
 let settings = Object.assign({
-  tolerance: 0, period: 'month', relay: '', railOverlay: true, recentStations: [], tracked: null
+  tolerance: 0, period: 'month', relay: '', railOverlay: true, recentStations: [], tracked: null, day: null, followDay: true
 }, load(SETTINGS_KEY, {}));
 const persistRuns = () => save(STORE_KEY, runs);
 const persistSettings = () => save(SETTINGS_KEY, settings);
@@ -87,13 +87,13 @@ const stationsReady = fetch('data/stations.json')
 /* =========================================================================
    Navigation
    ========================================================================= */
-const TITLES = { find: 'Find a train', stats: 'Stats', runs: 'Runs', log: 'Log a run', settings: 'Settings' };
+const TITLES = { day: 'My day', find: 'Find a train', stats: 'Stats', runs: 'Runs', log: 'Log a run', settings: 'Settings' };
 let currentView = 'map';
 let lastTab = 'map';
 
 function show(view) {
   currentView = view;
-  if (['map', 'find', 'stats', 'runs'].includes(view)) lastTab = view;
+  if (['map', 'day', 'find', 'stats', 'runs'].includes(view)) lastTab = view;
   document.body.dataset.view = view;
   $$('.view').forEach(v => v.classList.toggle('active', v.id === `view-${view}`));
   const tab = view === 'log' ? 'runs' : view === 'settings' ? lastTab : view;
@@ -109,6 +109,7 @@ function show(view) {
   if (view === 'find') renderRecentStations();
   if (view === 'stats') renderStats();
   if (view === 'runs') renderHistory();
+  if (view === 'day' && typeof renderDay === 'function') renderDay();
   if (view === 'settings') renderSettings();
   if (view !== 'map') window.scrollTo(0, 0);
 }
@@ -396,15 +397,21 @@ function demoService() {
    ========================================================================= */
 const live = { svc: null, pos: null, timer: null, updatedAt: 0, error: null, loading: false };
 
-function startTracking(uid, date) {
-  settings.tracked = { uid, date };
+function startTracking(uid, date, opts = {}) {
+  settings.tracked = { uid, date, legId: opts.legId || null };
   persistSettings();
   live.svc = null; live.pos = null; live.error = null;
   fittedFor = null; following = true;
   if (uid !== 'DEMO') demoStart = null;
-  show('map');
+  if (opts.navigate !== false) show('map');
   renderSheet();
   refreshLive();
+}
+
+// The job-card leg being tracked, if this train came from "My day".
+function trackedLeg() {
+  const t = settings.tracked, d = settings.day;
+  return t && t.legId && d ? d.legs.find(l => l.id === t.legId) : null;
 }
 
 function stopTracking() {
@@ -571,7 +578,11 @@ function renderSheet() {
   const c = classify(d) || 'ontime';
 
   $('#live-title').textContent = `${svc.headcode} · ${svc.origin} → ${svc.destination}`;
-  $('#live-sub').textContent = [svc.operator, fmtDate(svc.date)].filter(Boolean).join(' · ');
+  const leg = trackedLeg();
+  const legNo = leg ? settings.day.legs.indexOf(leg) + 1 : 0;
+  $('#live-sub').textContent = leg
+    ? `Train ${legNo} of ${settings.day.legs.length} today · her part: ${leg.stops[0].name} → ${leg.stops[leg.stops.length - 1].name}`
+    : [svc.operator, fmtDate(svc.date)].filter(Boolean).join(' · ');
   $('#map-search-label').textContent = `${svc.headcode} to ${svc.destination}`;
   const pill = $('#live-pill');
   pill.className = `pill pill-${state.kind === 'cancelled' ? 'late' : c}`;
@@ -686,6 +697,21 @@ $('#live-save').addEventListener('click', () => {
   if (!live.svc) return;
   resetForm();
   fillFromService(live.svc);
+  // From "My day": pick her part of the train and use the job card's times.
+  const leg = trackedLeg();
+  if (leg) {
+    formLegId = leg.id;
+    const first = leg.stops[0], last = leg.stops[leg.stops.length - 1];
+    const ai = live.svc.locs.findIndex(l => l.crs === first.crs);
+    const bi = live.svc.locs.findIndex((l, i) => i > ai && l.crs === last.crs);
+    if (ai >= 0 && $(`#leg-from option[value="${ai}"]`)) $('#leg-from').value = String(ai);
+    if (bi >= 0 && $(`#leg-to option[value="${bi}"]`)) $('#leg-to').value = String(bi);
+    applyLeg();
+    form.schedDep.value = first.time;
+    form.schedArr.value = last.time;
+    if (settings.day.name) form.notes.value = [`Job ${settings.day.name}`, form.notes.value].filter(Boolean).join(' · ');
+    updatePreviews();
+  }
   show('log');
 });
 
@@ -1026,6 +1052,7 @@ window.addEventListener('resize', () => {
    ========================================================================= */
 const form = $('#log-form');
 let formSvc = null;   // live service the form was opened from, if any
+let formLegId = null; // job-card leg (My day) the form was opened for, if any
 
 function resetForm() {
   form.reset();
@@ -1033,6 +1060,7 @@ function resetForm() {
   form.serviceUid.value = '';
   form.date.value = todayISO();
   formSvc = null;
+  formLegId = null;
   $('#leg-pick').hidden = true;
   $('#dep-details').open = false;
   $('#save-btn').textContent = 'Save run';
@@ -1124,6 +1152,8 @@ form.addEventListener('submit', e => {
     data.id = (crypto.randomUUID && crypto.randomUUID()) || String(Date.now()) + Math.random().toString(16).slice(2);
     data.createdAt = Date.now();
     runs.push(data);
+    const leg = formLegId && settings.day && settings.day.legs.find(l => l.id === formLegId);
+    if (leg) { leg.runId = data.id; persistSettings(); }
     persistRuns();
     toast(`Saved · ${describe(diffMins(data.schedArr, data.actArr))}`);
   }
