@@ -1,11 +1,14 @@
 // Offline support: cache the app shell, serve from cache, refresh in the background.
-const CACHE = 'righttime-v1';
+const CACHE = 'righttime-v2';
 const ASSETS = [
   './',
   './index.html',
   './style.css',
   './app.js',
   './manifest.webmanifest',
+  './data/stations.json',
+  './vendor/leaflet/leaflet.js',
+  './vendor/leaflet/leaflet.css',
   './icons/icon-192.png',
   './icons/icon-512.png',
   './icons/apple-touch-icon.png'
