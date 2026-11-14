@@ -125,9 +125,10 @@ $('#idle-find').addEventListener('click', () => show('find'));
    Map
    ========================================================================= */
 const map = L.map('map', { zoomControl: false, attributionControl: true }).setView([54.3, -2.3], 6);
-L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
-  subdomains: 'abcd', maxZoom: 19,
-  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/">CARTO</a>'
+// Standard OpenStreetMap map: free, no key (light personal use, with attribution).
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 19,
+  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
 }).addTo(map);
 const railLayer = L.tileLayer('https://{s}.tiles.openrailwaymap.org/standard/{z}/{x}/{y}.png', {
   subdomains: 'abc', maxZoom: 19, opacity: 0.7,

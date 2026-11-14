@@ -1,5 +1,5 @@
 // Offline support: cache the app shell, serve from cache, refresh in the background.
-const CACHE = 'righttime-v4';
+const CACHE = 'righttime-v5';
 const ASSETS = [
   './',
   './index.html',
