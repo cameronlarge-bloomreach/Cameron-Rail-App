@@ -21,25 +21,34 @@ It's a Progressive Web App (PWA): it installs from Safari onto the home screen, 
 
 ## How the live data works
 
-Live positions come from **[Realtime Trains](https://www.realtimetrains.co.uk/)**, which reports when each train passes stations and timing points. The map places the train between the last place it was reported and the next one, based on the time. It's not GPS, so the marker moves along a straight line between stations rather than following the exact curve of the track.
+Live data comes from the **[Realtime Trains next-generation API](https://github.com/realtimetrains/api-specification)** (`data.rtt.io`). It replaced the old `api.rtt.io` service, which shut down on 30 September 2026. The data originally comes from Network Rail's train reporting and signalling systems.
 
-Realtime Trains needs a login and blocks direct calls from web pages, so the app talks to it through a tiny **relay** you run for free on Cloudflare. It takes about 10 minutes, once.
+How the app places the train, most precise first:
+1. **Live signalling status.** Near stations, Realtime Trains reports *approaching*, *arriving*, *at platform*, *ready to depart* and *departing*. These come from the signalling system, so the map and panel show them directly (for example "Approaching Malton").
+2. **Actual reports.** Each time the train is recorded at a station or timing point, the app uses that exact time and delay.
+3. **Between reports.** The app moves the marker along the line using the timetable and the current delay, every 5 seconds. It never places the train beyond a timing point the train hasn't reported at yet.
 
-### 1. Get a free Realtime Trains API account
-1. Go to <https://api.rtt.io> and register. It's free for personal use.
-2. Once approved, note the **API username** and **API password** it gives you. These are different from a normal website login.
+It's not GPS, and no public UK source offers train GPS. The marker moves in straight lines between stations rather than along the exact curve of the track. With **detailed mode** (a paid Realtime Trains plan), you also get working-timetable times (what drivers actually run to) and passing points between stations. Those give many more reports per journey, so the position is noticeably more precise. The app and relay use detailed mode automatically if the token includes it.
+
+**Refresh rate.** Free tokens allow 100 requests an hour and 1,000 a day (Realtime Trains, October 2026). So the app fetches fresh data once a minute while tracking, and moves the marker locally in between. The relay shares each answer between phones for 45 seconds. If the limit is hit, it shows the last good data and says so.
+
+Realtime Trains requires that tokens are **never put inside an app**; they must be kept on a server. So the app talks to Realtime Trains through a tiny **relay** you run for free on Cloudflare. It takes about 10 minutes, once.
+
+### 1. Get a free Realtime Trains API token
+1. Go to <https://api-portal.rtt.io> and register. This needs a Realtime Trains account, and it's free for personal use.
+2. Request a token. The portal tells you whether it's a **refresh token** (most likely) or a **long-life access token**. Keep it private.
 
 ### 2. Set up the relay (Cloudflare Workers, free)
 1. Create a free account at <https://dash.cloudflare.com/sign-up>.
 2. Go to **Workers & Pages → Create → Create Worker**, name it something like `right-time`, and click **Deploy**.
 3. Click **Edit code**, delete what's there, paste in the contents of [`relay/worker.js`](relay/worker.js), and click **Deploy**.
-4. Back on the Worker's page, open **Settings → Variables and Secrets** and add two **Secrets**:
-   - `RTT_USERNAME`: your Realtime Trains API username
-   - `RTT_PASSWORD`: your Realtime Trains API password
+4. Back on the Worker's page, open **Settings → Variables and Secrets** and add one **Secret**:
+   - `RTT_REFRESH_TOKEN`: your token, if the portal called it a refresh token, **or**
+   - `RTT_ACCESS_TOKEN`: if it's a long-life access token. If your plan includes detailed mode, also add a plain variable `RTT_DETAILED` = `true`.
 5. Copy the Worker's address. It looks like `https://right-time.<your-name>.workers.dev`.
 
 ### 3. Connect the app
-In the app, open **Settings → Live train data**, paste the relay address, and tap **Save & test**. When you share a train from one phone, the link carries this address, so the other phone is set up automatically.
+In the app, open **Settings → Live train data**, paste the relay address, and tap **Save & test**. It reports whether it's connected and whether detailed mode is on. When you share a train from one phone, the link carries this address, so the other phone is set up automatically.
 
 ## Putting the app on an iPhone
 
@@ -52,7 +61,7 @@ Then on each iPhone: open the address in **Safari**, tap **Share → Add to Home
 
 ## Good to know
 - Drivers shouldn't touch their phones in the cab. The app doesn't need her phone at all while she drives: tracking comes from the railway's own data, so she can save the run once she's finished.
-- Data for Realtime Trains comes from Network Rail. Positions update when the train passes reporting points, usually every few minutes.
+- **Even more precise tracking** would mean reading Network Rail's raw signalling feed ("Train Describer") directly, which reports the train moving from one signal section to the next. That needs a server running 24/7 and a map of signal sections to locations that isn't publicly available for the whole network. It's a much bigger project, and Realtime Trains already uses that feed for its approaching/at platform/departing statuses.
 - Empty stock or freight moves may not appear in station searches.
 - Saved runs live only on that phone. Use **Settings → Export backup** now and then.
 - To try it on a computer: run `python3 -m http.server` in this folder and open <http://localhost:8000>.

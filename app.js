@@ -168,8 +168,13 @@ async function api(path) {
   let body = null;
   try { body = await res.json(); } catch { /* ignore */ }
   if (!res.ok || (body && body.error)) {
-    throw new ApiError(res.status === 401 || res.status === 403 ? 'auth' : res.status === 404 ? 'notfound' : 'http', res.status);
+    const s = res.status;
+    const kind = s === 429 ? 'ratelimit'
+      : (s === 401 || s === 403 || (body && /token/.test(body.error || ''))) ? 'auth'
+      : s === 404 ? 'notfound' : 'http';
+    throw new ApiError(kind, s);
   }
+  live.stale = res.headers.get('X-Relay-Cache') === 'stale';
   return body;
 }
 function apiErrorText(err) {
@@ -177,70 +182,76 @@ function apiErrorText(err) {
     case 'norelay': return 'Live data isn\'t set up on this phone yet. Add your relay address in Settings, or try the demo.';
     case 'offline': return 'No internet connection. It will try again shortly.';
     case 'network': return 'Couldn\'t reach the relay. Check the address in Settings.';
-    case 'auth': return 'The relay\'s Realtime Trains login was rejected. Check the username and password secrets on the relay.';
+    case 'auth': return 'The relay\'s Realtime Trains token was rejected or is missing. Check the token secret on the relay.';
+    case 'ratelimit': return 'Realtime Trains\' free hourly limit has been reached. It will try again in a few minutes.';
     case 'notfound': return 'Realtime Trains has no data for that.';
     default: return 'Something went wrong getting live data. It will try again shortly.';
   }
 }
 
-// RTT times: "1015", "101530", or working-timetable "1015H" (half minute).
-function rttMins(t) {
-  if (!t || typeof t !== 'string') return null;
-  const h = +t.slice(0, 2), m = +t.slice(2, 4);
-  if (Number.isNaN(h) || Number.isNaN(m)) return null;
-  let v = h * 60 + m;
-  if (/^\d{6}$/.test(t)) v += +t.slice(4, 6) / 60;
-  if (t.endsWith('H')) v += 0.5;
-  return v;
+// ISO datetime -> minutes since midnight (local) of the run date. Using one
+// base for the whole journey means trains that run past midnight just work.
+function isoMins(iso, base) {
+  if (!iso) return null;
+  const t = Date.parse(iso);
+  return Number.isNaN(t) ? null : (t - base) / 60000;
 }
 
-/* Turn an RTT service into something easy to draw. Times become minutes from
-   the run date's midnight, so trains that run past midnight still work. */
+/* Turn a Realtime Trains /gb-nr/service response into something easy to draw.
+   Booked times prefer the working timetable (what drivers run to) when the
+   token has detailed access, otherwise the public timetable. */
 function parseService(raw) {
-  if (!raw || !Array.isArray(raw.locations) || !raw.locations.length) throw new ApiError('notfound');
-  let base = null;
-  const norm = v => {
-    if (v == null) return null;
-    if (base == null) base = v;
-    return v < base - 360 ? v + 1440 : v;
-  };
-  const locs = raw.locations.map(l => {
-    const bArrRaw = rttMins(l.gbttBookedArrival || l.wttBookedArrival);
-    const bDepRaw = rttMins(l.gbttBookedDeparture || l.wttBookedDeparture || l.wttBookedPass);
-    const pass = l.displayAs === 'PASS' || (bArrRaw == null && !l.gbttBookedDeparture && !l.wttBookedDeparture && !!l.wttBookedPass);
-    const st = l.crs && STATIONS[l.crs];
-    const L0 = {
-      name: l.description || l.tiploc || '?',
-      crs: l.crs || null,
+  const s = raw && raw.service;
+  if (!s || !Array.isArray(s.locations) || !s.locations.length) throw new ApiError('notfound');
+  const md = s.scheduleMetadata || {};
+  const date = md.departureDate || String(md.uniqueIdentity || '').split(':').pop();
+  const base = new Date(date + 'T00:00:00').getTime();
+  const T = td => td ? {
+    b: isoMins(td.scheduleInternal || td.scheduleAdvertised, base),
+    act: isoMins(td.realtimeActual, base),
+    fc: isoMins(td.realtimeForecast || td.realtimeEstimate, base),
+    cancelled: !!td.isCancelled,
+  } : null;
+
+  const locs = s.locations.map(x => {
+    const td = x.temporalData || {}, loc = x.location || {};
+    const crs = (loc.shortCodes || [])[0] || null;
+    const st = crs && STATIONS[crs];
+    const a = T(td.arrival), d = T(td.departure), p = T(td.pass);
+    const disp = td.displayAs || 'PASS';
+    const dep = d || p;
+    const plat = x.locationMetadata && x.locationMetadata.platform;
+    return {
+      name: loc.description || (loc.longCodes || [])[0] || '?',
+      crs,
       coord: st ? [st[1], st[2]] : null,
-      pass,
-      cancelled: /CANCEL/.test(l.displayAs || ''),
-      platform: l.platform || '',
-      serviceLocation: l.serviceLocation || null,
-      bArr: norm(bArrRaw),
-      bDep: norm(bDepRaw),
-      rArr: norm(rttMins(l.realtimeArrival)),
-      rDep: norm(rttMins(l.realtimeDeparture || l.realtimePass)),
-      aArr: !!l.realtimeArrivalActual,
-      aDep: !!(l.realtimeDepartureActual || l.realtimePassActual),
+      pass: disp === 'PASS' || (!a && !d && !!p),
+      cancelled: disp === 'CANCELLED' || disp === 'DIVERTED',
+      platform: plat ? (plat.actual || plat.planned || '') : '',
+      status: td.status || null,
+      bArr: a ? a.b : null,
+      bDep: dep ? dep.b : null,
+      rArr: a ? (a.act ?? a.fc ?? a.b) : null,
+      rDep: dep ? (dep.act ?? dep.fc ?? dep.b) : null,
+      aArr: !!(a && a.act != null),
+      aDep: !!(dep && dep.act != null),
     };
-    if (L0.rArr == null) L0.rArr = L0.bArr;
-    if (L0.rDep == null) L0.rDep = L0.bDep;
-    return L0;
   });
-  const first = locs[0], last = locs[locs.length - 1];
+  const place = arr => arr && arr[0] && arr[0].location && arr[0].location.description;
+  const reasons = [...(s.reasons || []), ...s.locations.flatMap(x => x.reasons || [])]
+    .filter(r => r && r.type === 'DELAY' && r.shortText).map(r => r.shortText);
   return {
-    uid: raw.serviceUid,
-    date: raw.runDate,
-    headcode: raw.trainIdentity || raw.runningIdentity || '',
-    operator: raw.atocName || '',
-    origin: (raw.origin && raw.origin[0] && raw.origin[0].description) || first.name,
-    destination: (raw.destination && raw.destination[0] && raw.destination[0].description) || last.name,
+    uid: md.uniqueIdentity || `gb-nr:${md.identity}:${date}`,
+    date,
+    headcode: md.trainReportingIdentity || md.identity || '',
+    operator: (md.operator && md.operator.name) || '',
+    origin: place(s.origin) || locs[0].name,
+    destination: place(s.destination) || locs[locs.length - 1].name,
+    reasons: [...new Set(reasons)],
     locs,
   };
 }
 
-// Delay (minutes) at a calling point, using the most meaningful pair of times.
 // [booked, real] for a stop: departure once it has left (or at the origin),
 // otherwise arrival.
 function stopTimes(L, i, n) {
@@ -254,68 +265,98 @@ function locDelay(L, i, n) {
 }
 
 function minsSinceRunDate(dateISO) {
-  const mid = new Date(dateISO + 'T00:00:00');
-  return (Date.now() - mid.getTime()) / 60000;
+  return (Date.now() - new Date(dateISO + 'T00:00:00').getTime()) / 60000;
 }
 
-/* Work out where the train is now. */
+/* Work out where the train is now.
+   1. Live signalling status (approaching / at platform / departing) wins.
+   2. Otherwise: last actual report, then "dead reckoning" along the line using
+      the timetable and the current delay, never placing the train past a
+      timing point it hasn't reported at yet. */
 function trainState(svc) {
   const locs = svc.locs, n = locs.length;
   const now = minsSinceRunDate(svc.date);
-  const geoBefore = i => { for (let k = i; k >= 0; k--) if (locs[k].coord && !locs[k].cancelled) return k; return -1; };
-  const geoAfter = i => { for (let k = i; k < n; k++) if (locs[k].coord && !locs[k].cancelled) return k; return -1; };
-  const between = (a, b, fixed) => {
-    const ga = geoBefore(a), gb = geoAfter(b);
-    if (ga < 0 && gb < 0) return { kind: 'unknown' };
-    if (ga < 0) return { kind: 'between', from: a, to: b, latlng: locs[gb].coord, geoFrom: gb, geoTo: gb };
-    if (gb < 0) return { kind: 'between', from: a, to: b, latlng: locs[ga].coord, geoFrom: ga, geoTo: ga };
-    let p = fixed;
-    if (p == null) {
-      const t0 = locs[ga].rDep ?? locs[ga].rArr, t1 = locs[gb].rArr ?? locs[gb].rDep;
-      p = (t0 != null && t1 != null && t1 > t0) ? (now - t0) / (t1 - t0) : 0.5;
-    }
-    p = Math.min(0.97, Math.max(0.03, p));
-    const [la, lo] = locs[ga].coord, [lb, lob] = locs[gb].coord;
-    return { kind: 'between', from: a, to: b, geoFrom: ga, geoTo: gb, latlng: [la + (lb - la) * p, lo + (lob - lo) * p] };
-  };
-  const at = i => {
-    const g = locs[i].coord ? i : geoBefore(i);
-    return { kind: 'at', idx: i, latlng: g >= 0 ? locs[g].coord : null, geoFrom: g, geoTo: g };
-  };
+  const usable = l => l.coord && !l.cancelled;
+  const geoBefore = i => { for (let k = i; k >= 0; k--) if (usable(locs[k])) return k; return -1; };
+  const geoAfter = i => { for (let k = i; k < n; k++) if (usable(locs[k])) return k; return -1; };
+  const reported = l => l.aArr || l.aDep;
 
   if (locs.every(l => l.cancelled || l.pass)) return { kind: 'cancelled' };
 
-  // Prefer the live "where is it" marker if Realtime Trains gives one.
-  const here = locs.findIndex(l => l.serviceLocation);
-  if (here >= 0) {
-    const sl = locs[here].serviceLocation;
-    if (/^APPR/.test(sl)) {
-      let prev = here - 1; while (prev > 0 && !(locs[prev].aDep || locs[prev].aArr)) prev--;
-      return between(Math.max(prev, 0), here, 0.85);
+  let last = -1;
+  locs.forEach((l, i) => { if (reported(l)) last = i; });
+  const lastL = locs[Math.max(last, 0)];
+  const delayNow = last >= 0 ? (locDelay(lastL, last, n) ?? 0) : 0;
+
+  const between = (from, to, fixed) => {
+    const ga = geoBefore(from), gb = geoAfter(to);
+    if (ga < 0 && gb < 0) return { kind: 'unknown' };
+    if (ga < 0 || gb < 0 || ga === gb) {
+      const g = ga >= 0 ? ga : gb;
+      return { kind: 'between', from, to, latlng: locs[g].coord, geoFrom: g, geoTo: g };
     }
-    return at(here);
+    const A = locs[ga], B = locs[gb];
+    const tA = A.bDep ?? A.bArr, tB = B.bArr ?? B.bDep;
+    let p = fixed;
+    if (p == null) {
+      if (tA != null && tB != null && tB > tA) {
+        const frac = t => (t - tA) / (tB - tA);
+        p = frac(now - delayNow);
+        // Timing points between A and B (passing points in detailed mode)
+        // pin the estimate: past the last one reported, short of the next one.
+        for (let k = ga + 1; k < gb; k++) {
+          const K = locs[k], tk = K.bDep ?? K.bArr;
+          if (tk == null) continue;
+          if (reported(K)) p = Math.max(p, frac(tk));
+          else { p = Math.min(p, frac(tk)); break; }
+        }
+        if (!reported(B)) p = Math.min(p, 0.98);
+      } else {
+        const r0 = A.rDep ?? A.rArr, r1 = B.rArr ?? B.rDep;
+        p = (r0 != null && r1 != null && r1 > r0) ? (now - r0) / (r1 - r0) : 0.5;
+      }
+    }
+    p = Math.min(0.98, Math.max(0.02, p));
+    const [la, lo] = A.coord, [lb, lob] = B.coord;
+    return { kind: 'between', from, to, geoFrom: ga, geoTo: gb, latlng: [la + (lb - la) * p, lo + (lob - lo) * p] };
+  };
+  const at = (i, kind = 'at') => {
+    const g = usable(locs[i]) ? i : geoBefore(i);
+    return { kind, idx: i, latlng: g >= 0 ? locs[g].coord : null, geoFrom: g, geoTo: g };
+  };
+  const nextAfter = i => { let k = i + 1; while (k < n - 1 && locs[k].cancelled) k++; return Math.min(k, n - 1); };
+  const prevReported = i => { for (let k = i - 1; k >= 0; k--) if (reported(locs[k])) return k; return Math.max(i - 1, 0); };
+
+  // 1. Live status from signalling (most precise thing the API offers).
+  let si = -1;
+  locs.forEach((l, i) => { if (l.status) si = i; });
+  if (si >= 0 && si >= last) {
+    const st = locs[si].status;
+    const tag = s => Object.assign(s, { status: st, statusIdx: si });
+    if (st === 'APPROACHING') return tag(between(prevReported(si), si, 0.8));
+    if (st === 'ARRIVING') return tag(between(prevReported(si), si, 0.95));
+    if (st === 'DEPARTING' && si < n - 1) return tag(between(si, nextAfter(si), 0.03));
+    if (si === n - 1 && st === 'AT_PLATFORM') return tag(at(si, 'arrived'));
+    return tag(at(si));
   }
 
-  let last = -1;
-  locs.forEach((l, i) => { if (l.aArr || l.aDep) last = i; });
-  if (last < 0) return Object.assign(at(0), { kind: 'notstarted' });
-  if (last === n - 1 && locs[last].aArr) return Object.assign(at(last), { kind: 'arrived' });
-  const L0 = locs[last];
-  if (L0.aDep || (L0.pass && L0.aArr)) {
-    let next = last + 1;
-    while (next < n - 1 && (locs[next].cancelled)) next++;
-    return between(last, next);
-  }
+  // 2. Reports + timetable.
+  if (last < 0) return at(0, 'notstarted');
+  if (last === n - 1 && locs[last].aArr) return at(last, 'arrived');
+  if (lastL.aDep || lastL.pass) return between(last, nextAfter(last));
   return at(last);
 }
 
 /* ---------- Demo service (works without any setup) ---------- */
 let demoStart = null;
 function demoService() {
-  if (demoStart == null) demoStart = minsSinceRunDate(todayISO()) - 37;
-  const now = minsSinceRunDate(todayISO());
+  const date = todayISO();
+  if (demoStart == null) demoStart = minsSinceRunDate(date) - 37;
+  const now = minsSinceRunDate(date);
+  const base = new Date(date + 'T00:00:00').getTime();
+  const iso = m => new Date(base + m * 60000).toISOString();
   const stops = [
-    // crs, name, booked arr offset, booked dep offset, delay arr, delay dep, platform
+    // crs, name, booked arr, booked dep (mins after start), delay arr, delay dep, platform
     ['LDS', 'Leeds', null, 0, null, 1, '12'],
     ['YRK', 'York', 23, 25, 2, 3, '5'],
     ['NTR', 'Northallerton', 44, 45, 4, 4, '1'],
@@ -323,23 +364,30 @@ function demoService() {
     ['DHM', 'Durham', 75, 76, 2, 2, '2'],
     ['NCL', 'Newcastle', 90, null, 1, null, '3'],
   ];
-  const T = m => { const v = ((Math.round(m) % 1440) + 1440) % 1440; return `${pad(Math.floor(v / 60))}${pad(v % 60)}`; };
+  const td = (b, delay) => {
+    const real = demoStart + b + delay;
+    const out = { scheduleAdvertised: iso(demoStart + b) };
+    if (real <= now) out.realtimeActual = iso(real); else out.realtimeForecast = iso(real);
+    return out;
+  };
   const locations = stops.map(([crs, name, ba, bd, da, dd, plat], i) => {
-    const l = { tiploc: crs, crs, description: name, platform: plat, isPublicCall: true,
-      displayAs: i === 0 ? 'ORIGIN' : i === stops.length - 1 ? 'DESTINATION' : 'CALL' };
-    if (ba != null) {
-      const real = demoStart + ba + da;
-      Object.assign(l, { gbttBookedArrival: T(demoStart + ba), realtimeArrival: T(real), realtimeArrivalActual: real <= now });
-    }
-    if (bd != null) {
-      const real = demoStart + bd + dd;
-      Object.assign(l, { gbttBookedDeparture: T(demoStart + bd), realtimeDeparture: T(real), realtimeDepartureActual: real <= now });
-    }
-    return l;
+    const temporalData = { displayAs: 'CALL' };
+    if (ba != null) temporalData.arrival = td(ba, da);
+    if (bd != null) temporalData.departure = td(bd, dd);
+    return {
+      location: { description: name, shortCodes: [crs], longCodes: [crs] },
+      temporalData,
+      locationMetadata: { platform: { planned: plat } },
+    };
   });
+  const place = name => [{ location: { description: name } }];
   return {
-    serviceUid: 'DEMO', runDate: todayISO(), trainIdentity: '1N99', atocName: 'Demo service',
-    origin: [{ description: 'Leeds' }], destination: [{ description: 'Newcastle' }], locations
+    service: {
+      scheduleMetadata: { uniqueIdentity: `gb-nr:DEMO:${date}`, identity: 'DEMO', departureDate: date,
+        trainReportingIdentity: '1N99', operator: { name: 'Demo service' } },
+      origin: place('Leeds'), destination: place('Newcastle'), locations,
+      reasons: [],
+    },
   };
 }
 
@@ -379,10 +427,7 @@ async function refreshLive() {
     await stationsReady;
     let raw;
     if (t.uid === 'DEMO') raw = demoService();
-    else {
-      const [y, m, d] = t.date.split('-');
-      raw = await api(`/service/${encodeURIComponent(t.uid)}/${y}/${m}/${d}`);
-    }
+    else raw = await api(`/service?uniqueIdentity=${encodeURIComponent(t.uid)}`);
     live.svc = parseService(raw);
     live.error = null;
     live.updatedAt = Date.now();
@@ -399,12 +444,20 @@ function scheduleRefresh() {
   clearTimeout(live.timer);
   if (!settings.tracked) return;
   const arrived = live.pos && (live.pos.kind === 'arrived' || live.pos.kind === 'cancelled');
-  const ms = settings.tracked.uid === 'DEMO' ? 10000 : arrived ? 120000 : 30000;
+  // Free API allowance is 100 requests/hour, so ask for fresh data once a
+  // minute (less once it's arrived) and move the marker locally in between.
+  const ms = settings.tracked.uid === 'DEMO' ? 15000
+    : live.error && live.error.kind === 'ratelimit' ? 180000
+    : arrived ? 300000 : 60000;
   live.timer = setTimeout(() => { if (document.visibilityState === 'visible') refreshLive(); else scheduleRefresh(); }, ms);
 }
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && settings.tracked && Date.now() - live.updatedAt > 15000) refreshLive();
+  if (document.visibilityState === 'visible' && settings.tracked && Date.now() - live.updatedAt > 45000) refreshLive();
 });
+// Between API updates, keep the train moving along the line every few seconds.
+setInterval(() => {
+  if (live.svc && !live.loading && document.visibilityState === 'visible' && currentView === 'map') { drawLive(); renderSheet(); }
+}, 5000);
 $('#live-refresh').addEventListener('click', refreshLive);
 
 function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
@@ -501,7 +554,8 @@ function renderSheet() {
   const svc = live.svc;
   if (!svc) {
     $('#live-title').textContent = live.error ? 'Can\'t load train' : 'Loading train…';
-    $('#live-sub').textContent = settings.tracked.uid === 'DEMO' ? 'Demo' : `${settings.tracked.uid} · ${fmtDateShort(settings.tracked.date)}`;
+    $('#live-sub').textContent = settings.tracked.uid === 'DEMO' ? 'Demo'
+      : `Service ${String(settings.tracked.uid).split(':').slice(-2, -1)[0] || ''} · ${fmtDateShort(settings.tracked.date)}`;
     $('#live-pill').className = 'pill pill-ontime'; $('#live-pill').textContent = '–';
     $('#live-status').textContent = live.error ? apiErrorText(live.error) : '';
     $('#live-next').textContent = '';
@@ -541,6 +595,19 @@ function renderSheet() {
     const a = locs[state.geoFrom >= 0 ? state.geoFrom : state.from], b = locs[state.geoTo >= 0 ? state.geoTo : state.to];
     status = a === b ? `Near ${a.name}` : `Between ${a.name} and ${b.name}`;
   } else status = 'Position unknown';
+
+  // Live signalling status gives a more precise description where available.
+  if (state.status && state.kind !== 'arrived') {
+    const s = locs[state.statusIdx];
+    status = {
+      APPROACHING: `Approaching ${s.name}`,
+      ARRIVING: `Arriving at ${s.name}${plat(s)}`,
+      AT_PLATFORM: `At ${s.name}${plat(s)}`,
+      DEPART_PREPARING: `At ${s.name}${plat(s)}, preparing to leave`,
+      DEPART_READY: `At ${s.name}${plat(s)}, ready to leave`,
+      DEPARTING: `Departing ${s.name}`,
+    }[state.status] || status;
+  }
 
   if (state.kind === 'at' || state.kind === 'between') {
     const ni = nextStop(svc, state);
@@ -585,7 +652,8 @@ function renderMeta() {
   if (live.loading) { el.textContent = 'Updating…'; return; }
   if (!live.updatedAt) { el.textContent = ''; return; }
   const s = Math.round((Date.now() - live.updatedAt) / 1000);
-  el.textContent = s < 10 ? 'Updated just now' : s < 60 ? `Updated ${s}s ago` : `Updated ${Math.round(s / 60)} min ago`;
+  el.textContent = (s < 10 ? 'Updated just now' : s < 60 ? `Updated ${s}s ago` : `Updated ${Math.round(s / 60)} min ago`)
+    + (live.stale ? ' · saved copy (live limit reached)' : '');
 }
 setInterval(renderMeta, 5000);
 
@@ -699,23 +767,25 @@ function findStatus(msg, kind) {
 }
 
 let lastResults = null;
-async function searchDepartures() {
+let windowStart = null;   // minutes after midnight of the chosen date (1-hour windows)
+
+async function searchDepartures(shift = 0) {
   const crs = selectedCrs; if (!crs) return;
   settings.recentStations = [crs, ...(settings.recentStations || []).filter(c => c !== crs)].slice(0, 6);
   persistSettings(); renderRecentStations();
 
   const date = $('#find-date').value || todayISO();
-  const [y, m, d] = date.split('-');
-  let path = `/search/${crs}/${y}/${m}/${d}`;
-  if (date === todayISO()) {
-    const t = new Date(Date.now() - 60 * 60000);
-    if (isoDate(t) === date) path += `/${pad(t.getHours())}${pad(t.getMinutes())}`;
+  if (shift) windowStart = Math.min(Math.max(windowStart + shift, 0), 23 * 60);
+  else {
+    const now = new Date();
+    windowStart = date === todayISO() ? Math.max(0, now.getHours() * 60 + now.getMinutes() - 20) : 6 * 60;
   }
+  const timeFrom = `${date}T${pad(Math.floor(windowStart / 60))}:${pad(windowStart % 60)}`;
   $('#find-results').innerHTML = '';
   findStatus('Loading trains…');
   try {
-    const data = await api(path);
-    lastResults = { crs, services: (data && data.services) || [] };
+    const data = await api(`/location?code=${encodeURIComponent(crs)}&timeFrom=${encodeURIComponent(timeFrom)}`);
+    lastResults = { crs, date, services: (data && data.services) || [] };
     renderResults();
   } catch (err) {
     lastResults = null;
@@ -731,39 +801,54 @@ async function searchDepartures() {
 function renderResults() {
   if (!lastResults) return;
   const hc = $('#find-headcode').value.trim().toUpperCase();
-  const list = lastResults.services.filter(s => !hc || (s.trainIdentity || '').toUpperCase().includes(hc) || (s.runningIdentity || '').toUpperCase().includes(hc));
+  const base = new Date(lastResults.date + 'T00:00:00').getTime();
+  const rows = lastResults.services.map(s => {
+    const md = s.scheduleMetadata || {}, td = s.temporalData || {};
+    const terminating = !td.departure && !!td.arrival;
+    const ev = terminating ? td.arrival : (td.departure || td.pass || td.arrival || {});
+    const bk = isoMins(ev.scheduleInternal || ev.scheduleAdvertised, base);
+    const rt = isoMins(ev.realtimeActual || ev.realtimeForecast || ev.realtimeEstimate, base);
+    const place = arr => arr && arr[0] && arr[0].location && arr[0].location.description;
+    const plat = s.locationMetadata && s.locationMetadata.platform;
+    return {
+      uid: md.uniqueIdentity, date: md.departureDate || lastResults.date,
+      headcode: md.trainReportingIdentity || md.identity || '',
+      operator: md.operator && md.operator.name,
+      terminating, bk, rt, actual: !!ev.realtimeActual,
+      cancelled: td.displayAs === 'CANCELLED' || !!ev.isCancelled,
+      passing: !td.departure && !td.arrival && !!td.pass,
+      dest: terminating ? `from ${place(s.origin) || '?'}` : (place(s.destination) || '?'),
+      platform: plat ? (plat.actual || plat.planned || '') : '',
+    };
+  }).filter(r => r.uid && (!hc || r.headcode.toUpperCase().includes(hc)));
+
   const name = STATIONS[lastResults.crs] ? STATIONS[lastResults.crs][0] : lastResults.crs;
-  if (!list.length) {
-    findStatus(hc ? `No trains matching ${esc(hc)} at ${esc(name)}. Check the date, or clear the headcode to see everything.` : `No trains found at ${esc(name)} for this time.`);
-    $('#find-results').innerHTML = '';
+  const span = `${hhmm(windowStart)}–${hhmm(windowStart + 60)}`;
+  const pager = `<div class="pager"><button class="btn btn-ghost" data-shift="-60">Earlier</button><button class="btn btn-ghost" data-shift="60">Later</button></div>`;
+  if (!rows.length) {
+    findStatus(hc ? `No trains matching ${esc(hc)} at ${esc(name)} between ${span}. Try Earlier/Later, or clear the headcode.` : `No trains at ${esc(name)} between ${span}.`);
+    $('#find-results').innerHTML = pager;
     return;
   }
-  findStatus(`${list.length} train${list.length === 1 ? '' : 's'} at ${esc(name)}. Tap one to track it on the map.`);
-  $('#find-results').innerHTML = list.map(s => {
-    const ld = s.locationDetail || {};
-    const terminating = ld.displayAs === 'DESTINATION' || (!ld.gbttBookedDeparture && !ld.wttBookedDeparture && (ld.gbttBookedArrival || ld.wttBookedArrival));
-    const bk = rttMins(terminating ? (ld.gbttBookedArrival || ld.wttBookedArrival) : (ld.gbttBookedDeparture || ld.wttBookedDeparture || ld.wttBookedPass));
-    const rt = rttMins(terminating ? ld.realtimeArrival : (ld.realtimeDeparture || ld.realtimePass));
-    let delay = bk != null && rt != null ? Math.round(rt - bk) : null;
-    if (delay != null && delay < -720) delay += 1440;
-    const cancelled = /CANCEL/.test(ld.displayAs || '');
-    const dest = terminating
-      ? `from ${(ld.origin && ld.origin[0] && ld.origin[0].description) || '?'}`
-      : (ld.destination && ld.destination[0] && ld.destination[0].description) || '?';
-    const sub = cancelled ? '<span class="txt-late">Cancelled</span>'
+  findStatus(`${rows.length} train${rows.length === 1 ? '' : 's'} at ${esc(name)}, ${span}. Tap one to track it.`);
+  $('#find-results').innerHTML = rows.map(r => {
+    let delay = r.bk != null && r.rt != null ? Math.round(r.rt - r.bk) : null;
+    const sub = r.cancelled ? '<span class="txt-late">Cancelled</span>'
       : delay == null ? 'No live times yet'
-      : delay === 0 ? '<span class="txt-ok">On time</span>'
-      : `<span class="${delay > 0 ? 'txt-late' : 'txt-early'}">${describe(delay)}${rt != null ? ` · ${hhmm(rt)}` : ''}</span>`;
-    const meta = [s.atocName, ld.platform ? `plat ${ld.platform}` : '', terminating ? 'arrives' : ''].filter(Boolean).join(' · ');
-    return `<button class="dep" data-uid="${esc(s.serviceUid)}" data-date="${esc(s.runDate)}">
-      <span class="dep-time">${hhmm(bk)}</span>
-      <span class="dep-dest">${esc(dest)}</span>
-      <span class="dep-hc">${esc(s.trainIdentity || s.runningIdentity || '')}</span>
+      : delay === 0 ? `<span class="txt-ok">${r.actual ? 'Right time' : 'On time'}</span>`
+      : `<span class="${delay > 0 ? 'txt-late' : 'txt-early'}">${describe(delay)} · ${r.actual ? '' : 'exp '}${hhmm(r.rt)}</span>`;
+    const meta = [r.operator, r.platform ? `plat ${r.platform}` : '', r.terminating ? 'arrives' : r.passing ? 'passes' : ''].filter(Boolean).join(' · ');
+    return `<button class="dep" data-uid="${esc(r.uid)}" data-date="${esc(r.date)}">
+      <span class="dep-time">${hhmm(r.bk)}</span>
+      <span class="dep-dest">${esc(r.dest)}</span>
+      <span class="dep-hc">${esc(r.headcode)}</span>
       <span class="dep-meta">${sub}${meta ? ' · ' + esc(meta) : ''}</span>
     </button>`;
-  }).join('');
+  }).join('') + pager;
 }
 $('#find-results').addEventListener('click', e => {
+  const p = e.target.closest('[data-shift]');
+  if (p) { searchDepartures(Number(p.dataset.shift)); return; }
   const b = e.target.closest('.dep'); if (b) startTracking(b.dataset.uid, b.dataset.date);
 });
 
@@ -976,9 +1061,10 @@ function fillFromService(svc) {
   $('#leg-from').value = String(calls[0].i);
   $('#leg-to').value = String(calls[calls.length - 1].i);
   $('#leg-pick').hidden = false;
-  form.serviceUid.value = svc.uid === 'DEMO' ? '' : svc.uid;
+  form.serviceUid.value = svc.uid.includes(':DEMO:') ? '' : svc.uid;
   form.date.value = svc.date;
   form.headcode.value = svc.headcode;
+  if (svc.reasons && svc.reasons.length) form.notes.value = `Official delay reason: ${svc.reasons.join('; ')}`;
   applyLeg();
 }
 function applyLeg() {
@@ -1121,8 +1207,17 @@ $('#relay-save').addEventListener('click', async () => {
   try {
     const res = await fetch(settings.relay + '/ping', { cache: 'no-store' });
     const body = await res.json().catch(() => ({}));
-    if (res.ok && body.ok) { st.className = 'find-status ok'; st.textContent = 'Connected. Live data is ready.'; }
-    else if (body.app === 'right-time-relay') { st.className = 'find-status error'; st.textContent = 'The relay is running but its Realtime Trains login isn\'t set. Add the RTT_USERNAME and RTT_PASSWORD secrets.'; }
+    if (res.ok && body.ok) {
+      st.className = 'find-status ok';
+      st.textContent = body.detailed
+        ? 'Connected, with detailed mode: working timetable times and passing points for the most precise position.'
+        : 'Connected. Live data is ready (public timetable times; detailed mode isn\'t on this token).';
+    } else if (body.app === 'right-time-relay') {
+      st.className = 'find-status error';
+      st.textContent = body.error === 'no-token'
+        ? 'The relay is running but has no Realtime Trains token. Add the RTT_REFRESH_TOKEN secret.'
+        : 'The relay is running but Realtime Trains rejected its token. Check the RTT_REFRESH_TOKEN secret.';
+    }
     else { st.className = 'find-status error'; st.textContent = 'That address answered, but it isn\'t a Right Time relay.'; }
   } catch {
     st.className = 'find-status error'; st.textContent = 'Couldn\'t reach that address. Check it\'s typed correctly.';
@@ -1181,7 +1276,8 @@ $('#wipe-all').addEventListener('click', () => {
 });
 
 /* =========================================================================
-   Start-up: shared links look like  #track=P12345/2026-11-14&relay=https://…
+   Start-up: shared links look like
+   #track=gb-nr:P12345:2026-11-14/2026-11-14&relay=https://…
    ========================================================================= */
 function readLink() {
   const h = new URLSearchParams(location.hash.slice(1));
@@ -1202,8 +1298,10 @@ show('map');
 renderSheet();
 if (settings.tracked) {
   // Don't resume tracking an old train from days ago.
-  const age = (Date.now() - new Date(settings.tracked.date + 'T00:00:00').getTime()) / 86400000;
-  if (age > 2) stopTracking(); else refreshLive();
+  // Also drop links saved by the old (retired) API, which used plain IDs.
+  const t = settings.tracked;
+  const age = (Date.now() - new Date(t.date + 'T00:00:00').getTime()) / 86400000;
+  if (age > 2 || (t.uid !== 'DEMO' && !String(t.uid).includes(':'))) stopTracking(); else refreshLive();
 }
 
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
