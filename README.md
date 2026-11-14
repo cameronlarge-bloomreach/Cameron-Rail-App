@@ -74,4 +74,4 @@ Then on each iPhone: open the address in **Safari**, tap **Share → Add to Home
 - To try it on a computer: run `python3 -m http.server` in this folder and open <http://localhost:8000>.
 
 ## Credits
-Live data: Realtime Trains. Station locations: [uk-railway-stations](https://github.com/davwheat/uk-railway-stations) (ODbL). Map: © OpenStreetMap contributors, © CARTO, © OpenRailwayMap. Map library: Leaflet (BSD-2).
+Live data: Realtime Trains. Station locations: [uk-railway-stations](https://github.com/davwheat/uk-railway-stations) (ODbL). Map: © OpenStreetMap contributors, © OpenRailwayMap. Map library: Leaflet (BSD-2).
