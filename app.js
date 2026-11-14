@@ -426,6 +426,13 @@ function stopTracking() {
   renderSheet();
 }
 
+// Realtime Trains lists trains as "gb-nr:C16919:2026-11-14", but a single-train
+// lookup only accepts "C16919:2026-11-14" (no namespace in front).
+function serviceQuery(uid) {
+  const id = String(uid).split(':').slice(-2).join(':');
+  return `/service?uniqueIdentity=${encodeURIComponent(id)}`;
+}
+
 async function refreshLive() {
   clearTimeout(live.timer);
   const t = settings.tracked;
@@ -435,7 +442,7 @@ async function refreshLive() {
     await stationsReady;
     let raw;
     if (t.uid === 'DEMO') raw = demoService();
-    else raw = await api(`/service?uniqueIdentity=${encodeURIComponent(t.uid)}`);
+    else raw = await api(serviceQuery(t.uid));
     live.svc = parseService(raw);
     live.error = null;
     live.updatedAt = Date.now();
