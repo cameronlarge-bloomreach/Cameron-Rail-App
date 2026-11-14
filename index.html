@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Right Time</title>
+  <meta name="description" content="Track a train live on a map and see how early or late it's running.">
+  <meta name="theme-color" content="#14365c">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Right Time">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="icon" type="image/png" href="icons/icon-192.png">
+  <link rel="stylesheet" href="vendor/leaflet/leaflet.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body data-view="map">
+  <header class="topbar">
+    <button class="icon-btn back-btn" id="back-btn" aria-label="Back" hidden>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>
+    </button>
+    <h1 id="screen-title">Map</h1>
+    <button class="icon-btn" id="settings-btn" aria-label="Settings">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>
+    </button>
+  </header>
+
+  <!-- MAP (full screen) -->
+  <section id="view-map" class="view view-full active" aria-label="Live map">
+    <div id="map"></div>
+
+    <div class="map-top">
+      <button class="map-search" id="map-search">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>
+        <span id="map-search-label">Find a train</span>
+      </button>
+      <button class="map-fab" id="map-settings" aria-label="Settings">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>
+      </button>
+    </div>
+
+    <button class="map-fab locate-fab" id="follow-btn" aria-label="Centre on train" hidden>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>
+    </button>
+
+    <!-- Bottom sheet -->
+    <div class="sheet" id="sheet">
+      <div class="sheet-handle" id="sheet-handle" aria-hidden="true"></div>
+
+      <div id="sheet-idle">
+        <p class="sheet-title">Track a train live</p>
+        <p class="sheet-text">Find her train by station and headcode, and watch it move along the line with how early or late it's running.</p>
+        <div class="sheet-actions">
+          <button class="btn btn-primary" id="idle-find">Find a train</button>
+          <button class="btn btn-ghost" id="idle-demo">Try a demo</button>
+        </div>
+      </div>
+
+      <div id="sheet-live" hidden>
+        <div class="live-head">
+          <div class="live-head-text">
+            <div class="live-title" id="live-title">–</div>
+            <div class="live-sub" id="live-sub">–</div>
+          </div>
+          <span class="pill" id="live-pill">–</span>
+        </div>
+        <div class="live-status" id="live-status">–</div>
+        <div class="live-next" id="live-next"></div>
+        <div class="live-meta">
+          <span id="live-updated">–</span>
+          <button class="link-btn" id="live-refresh">Refresh</button>
+        </div>
+        <div class="sheet-actions four">
+          <button class="chip-btn" id="live-stops" aria-expanded="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4v16M6 6h.01M6 12h.01M6 18h.01M10 6h8M10 12h8M10 18h8"/></svg>Stops
+          </button>
+          <button class="chip-btn" id="live-share">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V3M7 8l5-5 5 5M5 13v6a2 2 0 002 2h10a2 2 0 002-2v-6"/></svg>Share
+          </button>
+          <button class="chip-btn" id="live-save">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12l5 5 9-10"/></svg>Save run
+          </button>
+          <button class="chip-btn" id="live-stop">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>Stop
+          </button>
+        </div>
+        <ol class="stops" id="stops-list" hidden></ol>
+      </div>
+    </div>
+  </section>
+
+  <main>
+    <!-- FIND -->
+    <section id="view-find" class="view">
+      <div class="card form">
+        <label class="field">
+          <span>Station</span>
+          <div class="station-picker">
+            <input type="text" id="find-station" placeholder="e.g. Leeds or LDS" autocomplete="off" autocapitalize="words" spellcheck="false">
+            <ul class="suggest" id="find-suggest" hidden></ul>
+          </div>
+        </label>
+        <div class="chips" id="recent-stations"></div>
+        <div class="row">
+          <label class="field">
+            <span>Date</span>
+            <input type="date" id="find-date">
+          </label>
+          <label class="field">
+            <span>Headcode (optional)</span>
+            <input type="text" id="find-headcode" placeholder="e.g. 1A23" maxlength="4" autocapitalize="characters" spellcheck="false">
+          </label>
+        </div>
+        <button class="btn btn-primary full" id="find-go">Show departures</button>
+      </div>
+      <div id="find-status" class="find-status" hidden></div>
+      <div id="find-results"></div>
+    </section>
+
+    <!-- STATS -->
+    <section id="view-stats" class="view">
+      <div class="segmented" role="tablist" aria-label="Time period">
+        <button role="tab" data-period="week">Week</button>
+        <button role="tab" data-period="month" aria-selected="true">Month</button>
+        <button role="tab" data-period="year">Year</button>
+        <button role="tab" data-period="all">All</button>
+      </div>
+
+      <div id="stats-empty" class="empty" hidden>
+        <p class="empty-title">No runs saved yet</p>
+        <p>Track a train and tap <strong>Save run</strong> when it arrives, or add one in <strong>Runs</strong>.</p>
+      </div>
+
+      <div id="stats-body">
+        <div class="hero card">
+          <div class="hero-num" id="stat-ontime-pct">–</div>
+          <div class="hero-label">early or on time</div>
+          <div class="hero-sub" id="stat-total">–</div>
+        </div>
+
+        <div class="card">
+          <div class="split-bar" id="split-bar" role="img"></div>
+          <div class="split-legend">
+            <div class="leg"><span class="sw sw-early"></span><span class="leg-name">Early</span><span class="leg-val" id="stat-early">–</span></div>
+            <div class="leg"><span class="sw sw-ontime"></span><span class="leg-name">On time</span><span class="leg-val" id="stat-ontime">–</span></div>
+            <div class="leg"><span class="sw sw-late"></span><span class="leg-name">Late</span><span class="leg-val" id="stat-late">–</span></div>
+          </div>
+        </div>
+
+        <div class="tiles">
+          <div class="tile card"><div class="tile-label">Average</div><div class="tile-val" id="stat-avg">–</div></div>
+          <div class="tile card"><div class="tile-label">On-time streak</div><div class="tile-val" id="stat-streak">–</div></div>
+          <div class="tile card"><div class="tile-label">Most early</div><div class="tile-val" id="stat-best">–</div><div class="tile-sub" id="stat-best-sub"></div></div>
+          <div class="tile card"><div class="tile-label">Most late</div><div class="tile-val" id="stat-worst">–</div><div class="tile-sub" id="stat-worst-sub"></div></div>
+          <div class="tile card"><div class="tile-label">Total mins early</div><div class="tile-val" id="stat-mins-early">–</div></div>
+          <div class="tile card"><div class="tile-label">Total mins late</div><div class="tile-val" id="stat-mins-late">–</div></div>
+        </div>
+
+        <div class="card">
+          <h2 class="card-title">Recent runs</h2>
+          <p class="card-hint">Minutes early (below the line) or late (above) at arrival. Tap a bar for details.</p>
+          <div class="chart-wrap">
+            <svg id="runs-chart" class="runs-chart" role="img" aria-label="Recent runs chart"></svg>
+            <div id="chart-tip" class="chart-tip" hidden></div>
+          </div>
+        </div>
+
+        <div class="card" id="reasons-card">
+          <h2 class="card-title">Why late?</h2>
+          <ul class="rank-list" id="reasons-list"></ul>
+        </div>
+
+        <div class="card" id="routes-card">
+          <h2 class="card-title">By route</h2>
+          <ul class="rank-list" id="routes-list"></ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- RUNS (history) -->
+    <section id="view-runs" class="view">
+      <div class="runs-bar">
+        <input type="search" id="history-search" class="search" placeholder="Search headcode, station, notes…" aria-label="Search runs">
+        <button class="btn btn-primary" id="add-run">Add</button>
+      </div>
+      <div id="history-empty" class="empty" hidden>
+        <p class="empty-title">Nothing here yet</p>
+        <p>Runs you save will appear here.</p>
+      </div>
+      <div id="history-list"></div>
+    </section>
+
+    <!-- LOG / EDIT -->
+    <section id="view-log" class="view">
+      <form id="log-form" class="card form" autocomplete="off">
+        <input type="hidden" name="id">
+        <input type="hidden" name="serviceUid">
+
+        <div id="leg-pick" class="leg-pick" hidden>
+          <p class="card-hint">From live data. If she only drove part of this train, pick where she took over and handed over, and the times update.</p>
+          <div class="row">
+            <label class="field"><span>Took over at</span><select id="leg-from"></select></label>
+            <label class="field"><span>Handed over at</span><select id="leg-to"></select></label>
+          </div>
+        </div>
+
+        <div class="row">
+          <label class="field">
+            <span>Date</span>
+            <input type="date" name="date" required>
+          </label>
+          <label class="field">
+            <span>Headcode</span>
+            <input type="text" name="headcode" list="dl-headcodes" placeholder="e.g. 1A23" maxlength="8" autocapitalize="characters">
+          </label>
+        </div>
+        <div class="row">
+          <label class="field">
+            <span>From</span>
+            <input type="text" name="from" list="dl-stations" placeholder="Origin" autocapitalize="words">
+          </label>
+          <label class="field">
+            <span>To</span>
+            <input type="text" name="to" list="dl-stations" placeholder="Destination" autocapitalize="words">
+          </label>
+        </div>
+
+        <fieldset class="timeset">
+          <legend>Arrival</legend>
+          <div class="row">
+            <label class="field">
+              <span>Booked</span>
+              <input type="time" name="schedArr" required>
+            </label>
+            <label class="field">
+              <span>Actual</span>
+              <div class="with-btn">
+                <input type="time" name="actArr" required>
+                <button type="button" class="now-btn" data-now="actArr">Now</button>
+              </div>
+            </label>
+          </div>
+          <div class="diff-preview" id="arr-preview" aria-live="polite"></div>
+        </fieldset>
+
+        <details class="timeset" id="dep-details">
+          <summary>Departure (optional)</summary>
+          <div class="row">
+            <label class="field">
+              <span>Booked</span>
+              <input type="time" name="schedDep">
+            </label>
+            <label class="field">
+              <span>Actual</span>
+              <div class="with-btn">
+                <input type="time" name="actDep">
+                <button type="button" class="now-btn" data-now="actDep">Now</button>
+              </div>
+            </label>
+          </div>
+          <div class="diff-preview" id="dep-preview" aria-live="polite"></div>
+        </details>
+
+        <label class="field" id="reason-field" hidden>
+          <span>Reason for delay</span>
+          <select name="reason">
+            <option value="">Choose…</option>
+            <option>Signalling</option>
+            <option>Train in front</option>
+            <option>Station dwell / dispatch</option>
+            <option>Passenger incident</option>
+            <option>Train fault</option>
+            <option>Speed restriction</option>
+            <option>Weather</option>
+            <option>Crew / connection</option>
+            <option>Late start</option>
+            <option>Other</option>
+          </select>
+        </label>
+
+        <label class="field">
+          <span>Notes</span>
+          <textarea name="notes" rows="2" placeholder="Anything worth remembering"></textarea>
+        </label>
+
+        <div class="form-actions">
+          <button type="submit" class="btn btn-primary" id="save-btn">Save run</button>
+          <button type="button" class="btn btn-danger" id="delete-btn" hidden>Delete</button>
+        </div>
+      </form>
+      <datalist id="dl-headcodes"></datalist>
+      <datalist id="dl-stations"></datalist>
+    </section>
+
+    <!-- SETTINGS -->
+    <section id="view-settings" class="view">
+      <div class="card form">
+        <h2 class="card-title">Live train data</h2>
+        <p class="card-hint">The web address of your Right Time relay (see the setup guide in the README). Shared tracking links include it, so the other phone is set up automatically.</p>
+        <label class="field">
+          <span>Relay address</span>
+          <input type="url" id="set-relay" placeholder="https://right-time.yourname.workers.dev" autocapitalize="off" spellcheck="false">
+        </label>
+        <div class="form-actions">
+          <button type="button" class="btn btn-primary" id="relay-save">Save &amp; test</button>
+        </div>
+        <div class="find-status" id="relay-status" hidden></div>
+      </div>
+
+      <div class="card form">
+        <h2 class="card-title">Map</h2>
+        <label class="toggle">
+          <input type="checkbox" id="set-rail-overlay">
+          <span>Show railway lines</span>
+        </label>
+      </div>
+
+      <div class="card form">
+        <h2 class="card-title">On-time rule</h2>
+        <label class="field">
+          <span>Count as on time if no more than this many minutes late</span>
+          <select id="set-tolerance">
+            <option value="0">0 minutes (right time)</option>
+            <option value="1">1 minute</option>
+            <option value="2">2 minutes</option>
+            <option value="3">3 minutes</option>
+            <option value="5">5 minutes (regional PPM)</option>
+            <option value="10">10 minutes (long-distance PPM)</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="card form">
+        <h2 class="card-title">Backup</h2>
+        <p class="card-hint">Saved runs are stored only on this phone. Export a backup now and then so nothing is lost if you change phones.</p>
+        <div class="form-actions stack">
+          <button type="button" class="btn btn-primary" id="export-json">Export backup</button>
+          <button type="button" class="btn btn-ghost" id="export-csv">Export spreadsheet (CSV)</button>
+          <label class="btn btn-ghost file-btn">
+            Restore from backup
+            <input type="file" id="import-json" accept="application/json,.json" hidden>
+          </label>
+        </div>
+      </div>
+
+      <div class="card form">
+        <h2 class="card-title">Danger zone</h2>
+        <button type="button" class="btn btn-danger" id="wipe-all">Delete all saved runs</button>
+      </div>
+
+      <p class="about">Right Time · <span id="run-count">0</span> runs saved<br>
+        Live data: Realtime Trains · Stations: uk-railway-stations (ODbL) · Map © OpenStreetMap, CARTO, OpenRailwayMap</p>
+    </section>
+  </main>
+
+  <nav class="tabbar" aria-label="Main">
+    <button data-tab="map" aria-current="page">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4L3 6v14l6-2 6 2 6-2V4l-6 2-6-2zM9 4v14M15 6v14"/></svg>
+      <span>Map</span>
+    </button>
+    <button data-tab="find">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>
+      <span>Find</span>
+    </button>
+    <button data-tab="stats">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 20V11M12 20V4M19 20v-6"/></svg>
+      <span>Stats</span>
+    </button>
+    <button data-tab="runs">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+      <span>Runs</span>
+    </button>
+  </nav>
+
+  <div id="toast" class="toast" role="status" hidden></div>
+
+  <script src="vendor/leaflet/leaflet.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
