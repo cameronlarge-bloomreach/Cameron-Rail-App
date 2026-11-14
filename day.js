@@ -129,7 +129,7 @@ function newId() { return (crypto.randomUUID && crypto.randomUUID()) || String(D
 
 function renderReview(el) {
   const d = dayState.draft;
-  const checks = d.legs.reduce((n, l) => n + l.stops.filter(s => s.check || !s.crs || !s.time).length + (/^\d[A-Z]\d\d$/.test(l.headcode) ? 0 : 1), 0);
+  const checks = d.legs.reduce((n, l) => n + (l.verified ? 0 : l.stops.filter(s => s.check || !s.crs || !s.time).length + (/^\d[A-Z]\d\d$/.test(l.headcode) ? 0 : 1)), 0);
   el.innerHTML = `
     <div class="card form">
       <h2 class="card-title">Check your trains</h2>
@@ -146,6 +146,8 @@ function renderReview(el) {
             <input type="text" class="rv-hc" value="${esc(leg.headcode)}" maxlength="4" autocapitalize="characters" spellcheck="false" placeholder="1A23"></label>
           <button type="button" class="link-btn rv-del-leg">Remove train</button>
         </div>
+        ${leg.verified ? `<p class="tt-badge tt-ok">✓ Matched to the timetable${leg.corrected ? ': stations and times filled in from it' : ''}</p>`
+          : d.timetableChecked ? '<p class="tt-badge tt-no">Couldn\'t match this train to the timetable. Please check it carefully.</p>' : ''}
         <div class="stop-edit-head"><span>Station</span><span>Time</span><span></span></div>
         ${leg.stops.map((s, si) => `
           <div class="stop-edit ${s.check || !s.crs || !s.time ? 'needs-check' : ''}" data-stop="${si}">
@@ -167,7 +169,7 @@ function renderReview(el) {
 
   const legOf = e => d.legs[+e.target.closest('[data-leg]').dataset.leg];
   const stopOf = e => legOf(e).stops[+e.target.closest('[data-stop]').dataset.stop];
-  el.querySelectorAll('.rv-hc').forEach(i => i.addEventListener('change', e => { legOf(e).headcode = e.target.value.trim().toUpperCase(); renderDay(); }));
+  el.querySelectorAll('.rv-hc').forEach(i => i.addEventListener('change', e => { const l = legOf(e); l.headcode = e.target.value.trim().toUpperCase(); l.uid = null; renderDay(); }));
   el.querySelectorAll('.rv-name').forEach(i => i.addEventListener('change', e => {
     const s = stopOf(e); s.name = e.target.value.trim();
     const leg = legOf(e);
@@ -207,7 +209,7 @@ function saveDraft() {
   const old = existing ? existing.legs : [];
   settings.days[d.date] = { date: d.date, name: d.name || '', legs: legs.map(l => {
     const prev = old.find(o => o.id === l.id && o.headcode === l.headcode);
-    return { id: l.id || newId(), headcode: l.headcode, stops: l.stops.map(s => ({ crs: s.crs, name: stationName(s), time: s.time, half: !!s.half })), uid: prev ? prev.uid : null, runId: prev ? prev.runId : null };
+    return { id: l.id || newId(), headcode: l.headcode, stops: l.stops.map(s => ({ crs: s.crs, name: stationName(s), time: s.time, half: !!s.half })), uid: l.uid || (prev ? prev.uid : null), runId: prev ? prev.runId : null };
   }) };
   dayState.selected = d.date; dayState.month = d.date.slice(0, 7);
   settings.followDay = true;
@@ -314,7 +316,17 @@ async function onCardFile(e) {
       toast("Couldn't find any trains on that photo. Try again closer and flatter, or add them by hand.");
       dayState.mode = null; renderDay(); return;
     }
-    dayState.draft = { date: dayState.selected, name: '', legs };
+    dayState.lastRead = JSON.parse(JSON.stringify(legs)); // what the photo said, before correcting
+    // Correct what was read using the official timetable for that date.
+    const date = dayState.selected;
+    const age = (new Date(todayISO() + 'T12:00:00') - new Date(date + 'T12:00:00')) / 86400000;
+    let tried = false;
+    if (settings.relay && age <= 14) {
+      tried = true;
+      try { await verifyLegs(legs, date, (label, done, total) => { dayState.reading = { label, done, total }; renderDay(); }); }
+      catch (err) { console.error(err); }
+    }
+    dayState.draft = { date, name: '', legs, timetableChecked: tried };
     dayState.mode = 'review';
   } catch (err) {
     console.error(err);
@@ -354,22 +366,38 @@ async function readJobCard(file, progress) {
   // Load the photo (Safari applies the camera's rotation automatically).
   const url = URL.createObjectURL(file);
   const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
-  const scale = Math.min(1, 2000 / Math.max(img.naturalWidth, img.naturalHeight));
-  const W = Math.round(img.naturalWidth * scale), H = Math.round(img.naturalHeight * scale);
-  const canvas = document.createElement('canvas'); canvas.width = W; canvas.height = H;
-  const ctx = canvas.getContext('2d', { willReadFrequently: true });
-  ctx.drawImage(img, 0, 0, W, H);
+  const draw = maxSide => {
+    const k = Math.min(1, maxSide / Math.max(img.naturalWidth, img.naturalHeight));
+    const W = Math.round(img.naturalWidth * k), H = Math.round(img.naturalHeight * k);
+    const c = document.createElement('canvas'); c.width = W; c.height = H;
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(img, 0, 0, W, H);
+    return { canvas: c, data: ctx.getImageData(0, 0, W, H).data, width: W, height: H };
+  };
+  // A small copy to find the tables, and a large one to read the text sharply.
+  const small = draw(2000), full = draw(3200);
   URL.revokeObjectURL(url);
-  const rgba = ctx.getImageData(0, 0, W, H).data;
 
   const worker = await getOcr(progress);
-  const bars = JobCardImage.findYellowBars(rgba, W, H);
+  const rec = async (image, whitelist) => {
+    await worker.setParameters({ tessedit_pageseg_mode: '7', tessedit_char_whitelist: whitelist });
+    return (await worker.recognize(toCanvas(image))).data.text;
+  };
+  const ocr = {
+    header: im => rec(im, '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ '),
+    name: im => rec(im, 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz. '),
+    time: im => rec(im, '0123456789%"'),
+    line: im => rec(im, ''),
+    nameScore: t => JobCard.nameScore(t, STATIONS),
+  };
+  const tables = await JobCardImage.readCard(small, full.width > small.width ? full : null, ocr,
+    (i, n) => progress(`Reading train ${i + 1} of ${n}`, i, n));
 
-  if (!bars.length) {
+  if (!tables) {
     // No yellow headers: read the whole page and look for station/time columns.
     progress('Reading the page', 0, 1);
     await worker.setParameters({ tessedit_pageseg_mode: '11', tessedit_char_whitelist: '' });
-    const { data } = await worker.recognize(canvas, {}, { blocks: true });
+    const { data } = await worker.recognize(small.canvas, {}, { blocks: true });
     const words = [];
     for (const b of data.blocks || []) for (const p of b.paragraphs) for (const l of p.lines) for (const w of l.words) words.push({ t: w.text, ...w.bbox });
     return JobCard.parseWords(words).map(t => ({
@@ -377,32 +405,12 @@ async function readJobCard(file, progress) {
       stops: JobCard.resolveStops(JobCard.fixTimes(t.stops.map(s => ({ name: s.name, digits: s.time.replace(':', ''), half: s.half }))), STATIONS),
     }));
   }
-
-  const slope = JobCardImage.estimateSkew(rgba, W, H, bars);
-  const regions = JobCardImage.tableRegions(bars, W, H);
-  const legs = [];
-  for (const [i, r] of regions.entries()) {
-    progress(`Reading train ${i + 1} of ${regions.length}`, i, regions.length);
-    await worker.setParameters({ tessedit_pageseg_mode: '7', tessedit_char_whitelist: '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ ' });
-    const head = JobCardImage.despeckle(JobCardImage.maskImage(rgba, W, r.text, 3, slope, H));
-    const headText = (await worker.recognize(toCanvas(JobCardImage.padCrop(head, 0, head.height, 20)))).data.text;
-
-    await worker.setParameters({ tessedit_pageseg_mode: '7', tessedit_char_whitelist: '' });
-    const body = JobCardImage.bodyImage(rgba, W, r.body, 2, slope, H);
-    const lines = [];
-    for (const b of JobCardImage.textBands(body)) {
-      const grey = JobCardImage.padCrop(body, b.y0, b.y1, 16);
-      let text = (await worker.recognize(toCanvas(JobCardImage.binarize(grey)))).data.text.trim();
-      if (!/\d{3}/.test(text)) {
-        const t2 = (await worker.recognize(toCanvas(grey))).data.text.trim();
-        if (/\d{3}/.test(t2)) text = t2;
-      }
-      lines.push(text);
-    }
-    const stops = JobCard.resolveStops(JobCard.fixTimes(JobCardImage.parseTableText(lines.join('\n'))), STATIONS);
-    if (stops.length) legs.push({ id: newId(), headcode: JobCard.findHeadcode(headText) || '', stops });
-  }
-  progress('Done', regions.length, regions.length);
+  const legs = tables.map(t => ({
+    id: newId(),
+    headcode: JobCard.findHeadcode(t.headText) || '',
+    stops: JobCard.resolveStops(JobCard.fixTimes(JobCardImage.parseTableText(t.lines.join('\n'), true)), STATIONS),
+  })).filter(l => l.stops.some(st => st.crs || st.time));
+  progress('Done', tables.length, tables.length);
   legs.sort((a, b) => (legMins(a) ?? 1e9) - (legMins(b) ?? 1e9));
   return legs;
 }
@@ -494,6 +502,105 @@ async function followDayTick() {
 }
 setInterval(() => { if (document.visibilityState === 'visible') followDayTick(); }, 60000);
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') followDayTick(); });
+
+/* ---------- Checking a job card against the timetable ----------
+   The photo reading isn't perfect, but the timetable is. Find each train
+   (by headcode, or by the stations and times that were read), then take its
+   stops and working-timetable times between where her part starts and ends. */
+const minsToCard = m => {
+  const whole = Math.floor(m + 1e-6), half = m - whole >= 0.25 && m - whole < 0.75;
+  const v = ((whole % 1440) + 1440) % 1440;
+  return { time: `${pad(Math.floor(v / 60))}:${pad(v % 60)}`, half };
+};
+
+async function findServiceForLeg(leg, date, onWait) {
+  // 1. By headcode (searching at the stations that were read).
+  if (/^\d[A-Z]\d\d$/.test(leg.headcode)) {
+    try {
+      const uid = await resolveLeg(leg, date, onWait);
+      if (uid) return parseService(await pacedApi(dayServicePath(uid), onWait));
+    } catch (err) { if (err && err.kind === 'ratelimit') throw err; }
+  }
+  // 2. Headcode unreadable: look for a train calling at the first stop at that time.
+  const known = leg.stops.filter(st => st.crs && st.time);
+  const first = known[0];
+  if (!first) return null;
+  // Only trains that also call at a later station from the card.
+  const later = known.find(st => st.crs !== first.crs && toMins(st.time) > toMins(first.time));
+  const from = Math.max(0, toMins(first.time) - 3);
+  const data = await pacedApi(`/location?code=${encodeURIComponent(first.crs)}&timeFrom=${encodeURIComponent(`${date}T${pad(Math.floor(from / 60))}:${pad(from % 60)}`)}${later ? `&filterTo=${encodeURIComponent(later.crs)}` : ''}`, onWait);
+  const base = new Date(date + 'T00:00:00').getTime();
+  const near = ((data && data.services) || []).filter(sv => {
+    const td = sv.temporalData || {}, ev = td.departure || td.arrival || {};
+    const m = isoMins(ev.scheduleInternal || ev.scheduleAdvertised, base);
+    return m != null && Math.abs(m - toMins(first.time)) <= 2;
+  });
+  if (near.length !== 1) return null; // none, or too many to be sure
+  const uid = near[0].scheduleMetadata.uniqueIdentity;
+  leg.uid = uid;
+  return parseService(await pacedApi(dayServicePath(uid), onWait));
+}
+
+// Index of the stop in the service that matches a card stop (station and/or time).
+function matchStop(svc, cardStop, which, fromIdx = 0) {
+  const t = cardStop.time ? toMins(cardStop.time) + (cardStop.half ? 0.5 : 0) : null;
+  const timeOf = L => which === 'arr' ? (L.bArr ?? L.bDep) : (L.bDep ?? L.bArr);
+  let best = -1, bestD = Infinity;
+  svc.locs.forEach((L, i) => {
+    if (i < fromIdx || L.pass || L.cancelled) return;
+    const sameStation = cardStop.crs && L.crs === cardStop.crs;
+    const d = t != null && timeOf(L) != null ? Math.abs(timeOf(L) - t) : null;
+    // Same station within 5 minutes, or (if the name was misread) the same time to the half minute.
+    const ok = (sameStation && (d == null || d <= 5)) || (d != null && d <= 0.5);
+    if (ok && (d ?? 0) < bestD) { best = i; bestD = d ?? 0; }
+  });
+  return best;
+}
+
+async function verifyLegs(legs, date, progress) {
+  let checked = 0;
+  for (const [n, leg] of legs.entries()) {
+    progress(`Checking train ${n + 1} of ${legs.length} against the timetable`, n, legs.length);
+    const onWait = () => progress(`Live-data limit reached. Waiting 30s… (train ${n + 1} of ${legs.length})`, n, legs.length);
+    let svc = null;
+    try { svc = await findServiceForLeg(leg, date, onWait); }
+    catch (err) { if (err && (err.kind === 'ratelimit' || err.kind === 'norelay')) break; continue; }
+    if (!svc) continue;
+    // Where her part starts and ends: the first and last card stops that match.
+    let a = -1, b = -1, ai = -1, bi = -1;
+    for (let k = 0; k < leg.stops.length; k++) { a = matchStop(svc, leg.stops[k], 'dep'); if (a >= 0) { ai = k; break; } }
+    for (let k = leg.stops.length - 1; k > ai; k--) { b = matchStop(svc, leg.stops[k], 'arr', Math.max(a, 0) + 1); if (b >= 0) { bi = k; break; } }
+    if (a < 0 || b <= a) continue;
+    const allCalls = svc.locs.map((L, i) => ({ L, i })).filter(x => !x.L.pass && !x.L.cancelled && x.L.crs);
+    // Card rows before the first match / after the last match that weren't
+    // recognised: take that many extra stops from the timetable.
+    const ca = allCalls.findIndex(x => x.i === a), cb = allCalls.findIndex(x => x.i === b);
+    // Only rows with something on them count at the end (a blank row there is
+    // usually a mark below the table); at the start, blank rows count too.
+    const after = leg.stops.slice(bi + 1).filter(st => st.name || st.time).length;
+    const startC = Math.max(0, ca - ai), endC = Math.min(allCalls.length - 1, cb + after);
+    const calls = allCalls.slice(startC, endC + 1);
+    if (calls.length < 2) continue;
+    const before = leg.stops.map(st => `${st.crs}|${st.time}|${st.half}`).join(',');
+    leg.stops = calls.map((x, k) => {
+      const m = k === calls.length - 1 ? (x.L.bArr ?? x.L.bDep) : (x.L.bDep ?? x.L.bArr);
+      const t = minsToCard(m);
+      const read = leg.stops.find(st => st.crs === x.L.crs);
+      // The free timetable gives public times, which can differ from the card's
+      // working times by a minute and drop the ½. Where the card was read
+      // confidently at this station and is within a minute, keep the card's time.
+      let time = t.time, half = t.half;
+      if (read && read.time && !read.check && Math.abs(toMins(read.time) + (read.half ? 0.5 : 0) - m) <= 1) { time = read.time; half = !!read.half; }
+      return { name: read ? read.name : x.L.name, crs: x.L.crs, time, half, check: false };
+    });
+    if (svc.headcode && svc.headcode !== leg.headcode) leg.headcode = svc.headcode;
+    leg.uid = svc.uid;
+    leg.verified = true;
+    leg.corrected = before !== leg.stops.map(st => `${st.crs}|${st.time}|${st.half}`).join(',');
+    checked++;
+  }
+  return checked;
+}
 
 /* ---------- Saving runs from the day ---------- */
 function matchIndex(svc, crs, fromIdx = 0) {
@@ -619,7 +726,7 @@ function readDayLink() {
 
 /* ---------- Start-up ---------- */
 // Shown in Settings so we can tell which version a phone is running.
-const APP_VERSION = '2026-11-14.10';
+const APP_VERSION = '2026-11-14.11';
 (() => { const a = document.querySelector('.about'); if (a) a.insertAdjacentHTML('beforeend', `<br>Version ${APP_VERSION}`); })();
 
 stationsReady.then(() => {
