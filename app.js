@@ -23,9 +23,24 @@ const DEFAULT_RELAY = 'https://right-time-relay.cameron6333.workers.dev';
 
 let runs = load(STORE_KEY, []);
 let settings = Object.assign({
-  tolerance: 0, period: 'month', relay: DEFAULT_RELAY, railOverlay: true, recentStations: [], tracked: null, day: null, followDay: true
+  tolerance: 0, period: 'month', relay: DEFAULT_RELAY, railOverlay: true, recentStations: [], tracked: null, days: {}, followDay: true
 }, load(SETTINGS_KEY, {}));
 if (!settings.relay) settings.relay = DEFAULT_RELAY;
+// Job cards are kept per date ({ 'YYYY-MM-DD': day }). Move an older single saved day across.
+if (!settings.days || typeof settings.days !== 'object') settings.days = {};
+if ('day' in settings) {
+  if (settings.day && settings.day.date) settings.days[settings.day.date] = settings.days[settings.day.date] || settings.day;
+  delete settings.day;
+  save(SETTINGS_KEY, settings);
+}
+const dayForDate = date => (date && settings.days[date]) || null;
+function findLegAnywhere(id) {
+  for (const day of Object.values(settings.days)) {
+    const leg = day.legs.find(l => l.id === id);
+    if (leg) return { day, leg };
+  }
+  return null;
+}
 const persistRuns = () => save(STORE_KEY, runs);
 const persistSettings = () => save(SETTINGS_KEY, settings);
 
@@ -416,7 +431,7 @@ function startTracking(uid, date, opts = {}) {
 
 // The job-card leg being tracked, if this train came from "My day".
 function trackedLeg() {
-  const t = settings.tracked, d = settings.day;
+  const t = settings.tracked, d = t ? dayForDate(t.date) : null;
   return t && t.legId && d ? d.legs.find(l => l.id === t.legId) : null;
 }
 
@@ -592,9 +607,10 @@ function renderSheet() {
 
   $('#live-title').textContent = `${svc.headcode} · ${svc.origin} → ${svc.destination}`;
   const leg = trackedLeg();
-  const legNo = leg ? settings.day.legs.indexOf(leg) + 1 : 0;
+  const tday = leg ? dayForDate(settings.tracked.date) : null;
+  const legNo = leg ? tday.legs.indexOf(leg) + 1 : 0;
   $('#live-sub').textContent = leg
-    ? `Train ${legNo} of ${settings.day.legs.length} today · her part: ${leg.stops[0].name} → ${leg.stops[leg.stops.length - 1].name}`
+    ? `Train ${legNo} of ${tday.legs.length}${tday.date === todayISO() ? ' today' : ''} · her part: ${leg.stops[0].name} → ${leg.stops[leg.stops.length - 1].name}`
     : [svc.operator, fmtDate(svc.date)].filter(Boolean).join(' · ');
   $('#map-search-label').textContent = `${svc.headcode} to ${svc.destination}`;
   const pill = $('#live-pill');
@@ -722,7 +738,8 @@ $('#live-save').addEventListener('click', () => {
     applyLeg();
     form.schedDep.value = first.time;
     form.schedArr.value = last.time;
-    if (settings.day.name) form.notes.value = [`Job ${settings.day.name}`, form.notes.value].filter(Boolean).join(' · ');
+    const tday = dayForDate(settings.tracked.date);
+    if (tday && tday.name) form.notes.value = [`Job ${tday.name}`, form.notes.value].filter(Boolean).join(' · ');
     updatePreviews();
   }
   show('log');
@@ -1165,8 +1182,8 @@ form.addEventListener('submit', e => {
     data.id = (crypto.randomUUID && crypto.randomUUID()) || String(Date.now()) + Math.random().toString(16).slice(2);
     data.createdAt = Date.now();
     runs.push(data);
-    const leg = formLegId && settings.day && settings.day.legs.find(l => l.id === formLegId);
-    if (leg) { leg.runId = data.id; persistSettings(); }
+    const found = formLegId && findLegAnywhere(formLegId);
+    if (found) { found.leg.runId = data.id; persistSettings(); }
     persistRuns();
     toast(`Saved · ${describe(diffMins(data.schedArr, data.actArr))}`);
   }

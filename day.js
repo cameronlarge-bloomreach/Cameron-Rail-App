@@ -5,7 +5,8 @@
    Uses globals from app.js (settings, api, STATIONS, show, startTracking…).
    ========================================================================= */
 
-const dayState = { mode: null, draft: null, reading: null };
+const dayState = { mode: null, draft: null, reading: null, selected: todayISO(), month: todayISO().slice(0, 7) };
+const selDay = () => dayForDate(dayState.selected);
 
 /* ---------- Times on job cards: "0819½" ---------- */
 function cardTimeLabel(s) { return s.time ? s.time.replace(':', '') + (s.half ? '½' : '') : '—'; }
@@ -24,17 +25,77 @@ const legTitle = leg => `${leg.headcode || '????'} · ${stationName(leg.stops[0]
 /* ---------- Rendering ---------- */
 function renderDay() {
   const el = $('#day-body');
-  const day = settings.day;
   if (dayState.mode === 'reading') return renderReading(el);
   if (dayState.mode === 'review' && dayState.draft) return renderReview(el);
-  if (!day || !day.legs || !day.legs.length) return renderDayEmpty(el);
-  renderPlan(el, day);
+  el.innerHTML = '<div id="cal"></div><div id="day-detail"></div>';
+  renderCalendar($('#cal'));
+  const day = selDay();
+  if (!day || !day.legs || !day.legs.length) return renderDayEmpty($('#day-detail'));
+  renderPlan($('#day-detail'), day);
+}
+
+/* ---------- Calendar ---------- */
+// How a date went: from runs saved that day (job card or added by hand).
+function dateSummary(date) {
+  const dayRuns = runs.filter(r => r.date === date && diffMins(r.schedArr, r.actArr) != null);
+  const card = dayForDate(date);
+  if (!dayRuns.length) return card ? { cls: 'pending', label: 'Job card, not saved yet' } : null;
+  const late = dayRuns.filter(r => classify(diffMins(r.schedArr, r.actArr)) === 'late').length;
+  const cls = late === 0 ? 'good' : late * 2 > dayRuns.length ? 'bad' : 'mixed';
+  return { cls, label: `${dayRuns.length} run${dayRuns.length === 1 ? '' : 's'}, ${late} late` };
+}
+
+function renderCalendar(el) {
+  const [y, m] = dayState.month.split('-').map(Number);
+  const first = new Date(y, m - 1, 1);
+  const daysIn = new Date(y, m, 0).getDate();
+  const lead = (first.getDay() + 6) % 7; // Monday first
+  const today = todayISO();
+  const title = first.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
+  let cells = '';
+  for (let i = 0; i < lead; i++) cells += '<span class="cal-cell cal-blank"></span>';
+  for (let d = 1; d <= daysIn; d++) {
+    const date = `${y}-${pad(m)}-${pad(d)}`;
+    const sum = dateSummary(date);
+    const cls = ['cal-cell', date === today ? 'cal-today' : '', date === dayState.selected ? 'cal-sel' : '', sum ? `cal-${sum.cls}` : ''].join(' ');
+    cells += `<button class="${cls}" data-date="${date}" aria-label="${esc(fmtDate(date))}${sum ? ': ' + esc(sum.label) : ''}">
+      <span class="cal-num">${d}</span>${sum ? '<span class="cal-dot"></span>' : ''}</button>`;
+  }
+  el.innerHTML = `
+    <div class="card cal">
+      <div class="cal-head">
+        <button class="icon-btn cal-nav" data-step="-1" aria-label="Previous month"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg></button>
+        <div class="cal-title">${esc(title)}</div>
+        <button class="icon-btn cal-nav" data-step="1" aria-label="Next month"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg></button>
+      </div>
+      <div class="cal-grid cal-dow">${['M', 'T', 'W', 'T', 'F', 'S', 'S'].map(x => `<span>${x}</span>`).join('')}</div>
+      <div class="cal-grid">${cells}</div>
+      <div class="cal-key">
+        <span><i class="cal-key-dot cal-good"></i>All on time</span>
+        <span><i class="cal-key-dot cal-mixed"></i>Some late</span>
+        <span><i class="cal-key-dot cal-bad"></i>Mostly late</span>
+        <span><i class="cal-key-dot cal-pending"></i>Not saved</span>
+      </div>
+    </div>`;
+  el.querySelectorAll('.cal-nav').forEach(b => b.addEventListener('click', () => {
+    const d = new Date(y, m - 1 + Number(b.dataset.step), 1);
+    dayState.month = `${d.getFullYear()}-${pad(d.getMonth() + 1)}`;
+    renderDay();
+  }));
+  el.querySelectorAll('.cal-cell[data-date]').forEach(b => b.addEventListener('click', () => {
+    dayState.selected = b.dataset.date; dayState.notice = null;
+    renderDay();
+    const det = $('#day-detail'); if (det) det.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }));
 }
 
 function renderDayEmpty(el) {
+  const date = dayState.selected;
+  const ageDays = Math.round((new Date(todayISO() + 'T12:00:00') - new Date(date + 'T12:00:00')) / 86400000);
   el.innerHTML = `
     <div class="card">
-      <h2 class="card-title">Load your job card</h2>
+      <h2 class="card-title">${date === todayISO() ? 'Load today\'s job card' : `Job card for ${esc(fmtDate(date))}`}</h2>
+      ${ageDays > 14 ? '<p class="find-status">This is more than 14 days ago. The free live data only goes back 14 days, so trains can be saved but their actual times can\'t be filled in.</p>' : ''}
       <p class="card-hint">Take a photo of the job card (or pick one from Photos). The app reads each train (headcode, stations and times), then follows them through the day and saves how early or late each one was.</p>
       <label class="btn btn-primary full file-btn">
         Upload job card photo
@@ -45,7 +106,7 @@ function renderDayEmpty(el) {
     </div>`;
   $('#card-file').addEventListener('change', onCardFile);
   $('#card-manual').addEventListener('click', () => {
-    dayState.draft = { date: todayISO(), name: '', legs: [blankLeg()] };
+    dayState.draft = { date: dayState.selected, name: '', legs: [blankLeg()] };
     dayState.mode = 'review';
     renderDay();
   });
@@ -139,7 +200,16 @@ function saveDraft() {
   if (bad.length && !confirm(`${bad.length} train${bad.length === 1 ? ' has' : 's have'} no valid headcode, so ${bad.length === 1 ? 'it' : 'they'} can't be tracked live. Save anyway?`)) return;
   const dropped = d.legs.reduce((n, l) => n + l.stops.filter(s => !(s.crs && s.time)).length, 0);
   legs.sort((a, b) => (legMins(a) ?? 0) - (legMins(b) ?? 0));
-  settings.day = { date: d.date, name: d.name || '', legs: legs.map(l => ({ id: l.id || newId(), headcode: l.headcode, stops: l.stops.map(s => ({ crs: s.crs, name: stationName(s), time: s.time, half: !!s.half })), uid: null, runId: null })) };
+  const existing = dayForDate(d.date);
+  if (existing && d.originalDate !== d.date && !confirm(`There's already a job card for ${fmtDate(d.date)}. Replace it?`)) return;
+  if (d.originalDate && d.originalDate !== d.date) delete settings.days[d.originalDate];
+  // Keep saved results for trains that are unchanged.
+  const old = existing ? existing.legs : [];
+  settings.days[d.date] = { date: d.date, name: d.name || '', legs: legs.map(l => {
+    const prev = old.find(o => o.id === l.id && o.headcode === l.headcode);
+    return { id: l.id || newId(), headcode: l.headcode, stops: l.stops.map(s => ({ crs: s.crs, name: stationName(s), time: s.time, half: !!s.half })), uid: prev ? prev.uid : null, runId: prev ? prev.runId : null };
+  }) };
+  dayState.selected = d.date; dayState.month = d.date.slice(0, 7);
   settings.followDay = true;
   persistSettings();
   dayState.mode = null; dayState.draft = null;
@@ -178,9 +248,11 @@ function renderPlan(el, day) {
           <div class="plan-sub">${day.legs.length} train${day.legs.length === 1 ? '' : 's'} · ${esc(cardTimeLabel(first.stops[0]))}–${esc(cardTimeLabel(last.stops[last.stops.length - 1]))}</div>
         </div>
       </div>
-      <label class="toggle"><input type="checkbox" id="follow-day" ${settings.followDay ? 'checked' : ''} ${isToday ? '' : 'disabled'}>
-        <span>Follow my day on the map${isToday ? '' : ' (on the day)'}</span></label>
-      <p class="card-hint">${isToday ? 'The map switches to each train as the shift goes on, so it can be followed from either phone.' : 'This day is not today. Tracking starts on the day.'}</p>
+      ${day.date >= todayISO() ? `<label class="toggle"><input type="checkbox" id="follow-day" ${settings.followDay ? 'checked' : ''} ${isToday ? '' : 'disabled'}>
+        <span>Follow my day on the map${isToday ? '' : ' (on the day)'}</span></label>` : ''}
+      <p class="card-hint">${isToday ? 'The map switches to each train as the shift goes on, so it can be followed from either phone.'
+        : day.date < todayISO() ? 'A past day: tap Save to fill in how early or late each train was from the live data.'
+        : 'A future day: the map will follow these trains on the day.'}</p>
       <div class="sheet-actions">
         <button class="btn btn-ghost" id="day-share">Share day</button>
         <button class="btn btn-ghost" id="day-edit">Edit</button>
@@ -210,15 +282,15 @@ function renderPlan(el, day) {
       }).join('')}
     </div>`;
 
-  $('#follow-day').addEventListener('change', e => { settings.followDay = e.target.checked; persistSettings(); if (settings.followDay) followDayTick(); });
+  const fd = $('#follow-day'); if (fd) fd.addEventListener('change', e => { settings.followDay = e.target.checked; persistSettings(); if (settings.followDay) followDayTick(); });
   $('#day-edit').addEventListener('click', () => {
-    dayState.draft = JSON.parse(JSON.stringify({ date: day.date, name: day.name, legs: day.legs }));
+    dayState.draft = JSON.parse(JSON.stringify({ date: day.date, originalDate: day.date, name: day.name, legs: day.legs }));
     dayState.mode = 'review'; renderDay();
   });
   $('#day-clear').addEventListener('click', () => {
     if (!confirm('Clear this day? Saved runs stay in your stats.')) return;
     if (settings.tracked && settings.tracked.legId) stopTracking();
-    settings.day = null; persistSettings(); renderDay();
+    delete settings.days[day.date]; persistSettings(); renderDay();
   });
   $('#day-share').addEventListener('click', shareDay);
   const sa = $('#day-save-all'); if (sa) sa.addEventListener('click', () => { dayState.notice = null; sa.disabled = true; sa.textContent = 'Saving… (finding each train)'; saveFinishedLegs(unsaved); });
@@ -226,7 +298,8 @@ function renderPlan(el, day) {
   el.querySelectorAll('.dleg-track').forEach(b => b.addEventListener('click', e => trackLeg(legById(e.target.closest('.dleg').dataset.id), true)));
   el.querySelectorAll('.dleg-save').forEach(b => b.addEventListener('click', e => saveFinishedLegs([legById(e.target.closest('.dleg').dataset.id)])));
 }
-const legById = id => settings.day && settings.day.legs.find(l => l.id === id);
+const legById = id => { const f = findLegAnywhere(id); return f ? f.leg : null; };
+const dayOfLeg = leg => { const f = leg && findLegAnywhere(leg.id); return f ? f.day : null; };
 
 /* ---------- Upload & read ---------- */
 async function onCardFile(e) {
@@ -241,7 +314,7 @@ async function onCardFile(e) {
       toast("Couldn't find any trains on that photo. Try again closer and flatter, or add them by hand.");
       dayState.mode = null; renderDay(); return;
     }
-    dayState.draft = { date: todayISO(), name: '', legs };
+    dayState.draft = { date: dayState.selected, name: '', legs };
     dayState.mode = 'review';
   } catch (err) {
     console.error(err);
@@ -375,11 +448,12 @@ async function resolveLeg(leg, date, onWait) {
 }
 
 async function trackLeg(leg, navigate) {
-  if (!leg || !settings.day) return;
+  const day = dayOfLeg(leg);
+  if (!leg || !day) return;
   try {
-    const uid = await resolveLeg(leg, settings.day.date);
+    const uid = await resolveLeg(leg, day.date);
     if (!uid) { toast(`Couldn't find ${leg.headcode} in the live data yet`); return; }
-    startTracking(uid, settings.day.date, { legId: leg.id, navigate });
+    startTracking(uid, day.date, { legId: leg.id, navigate });
   } catch (err) {
     toast(apiErrorText(err));
   }
@@ -406,8 +480,8 @@ function legForNow(day) {
 
 let followBusy = false;
 async function followDayTick() {
-  const day = settings.day;
-  if (!day || !settings.followDay || day.date !== todayISO() || followBusy) return;
+  const day = dayForDate(todayISO());
+  if (!day || !settings.followDay || followBusy) return;
   followBusy = true;
   try {
     // Save the train that has just arrived (once).
@@ -450,7 +524,8 @@ async function saveFinishedLegsInner(legs, quiet) {
     progress(i);
     const onWait = () => progress(i, `Live-data limit reached. Waiting 30s, then carrying on (${i + 1} of ${todo.length})…`);
     try {
-      const uid = await resolveLeg(leg, settings.day.date, onWait);
+      const legDay = dayOfLeg(leg);
+      const uid = await resolveLeg(leg, legDay.date, onWait);
       if (!uid) { notFound.push(leg.headcode); continue; }
       const svc = parseService(await pacedApi(dayServicePath(uid), onWait));
       const first = leg.stops[0], last = leg.stops[leg.stops.length - 1];
@@ -458,12 +533,12 @@ async function saveFinishedLegsInner(legs, quiet) {
       const A = ai >= 0 ? svc.locs[ai] : null, B = bi >= 0 ? svc.locs[bi] : null;
       if (!B || !B.aArr) { waiting++; continue; }
       const run = {
-        id: newId(), createdAt: Date.now(), serviceUid: uid, date: settings.day.date, headcode: leg.headcode,
+        id: newId(), createdAt: Date.now(), serviceUid: uid, date: legDay.date, headcode: leg.headcode,
         from: stationName(first), to: stationName(last),
         // Booked times come from the job card (the working timetable she drives to).
         schedDep: first.time, actDep: A && A.aDep ? hhmm(A.rDep) : '',
         schedArr: last.time, actArr: hhmm(B.rArr),
-        reason: '', notes: [settings.day.name ? `Job ${settings.day.name}` : '', svc.reasons && svc.reasons.length ? `Official delay reason: ${svc.reasons.join('; ')}` : ''].filter(Boolean).join(' · '),
+        reason: '', notes: [legDay.name ? `Job ${legDay.name}` : '', svc.reasons && svc.reasons.length ? `Official delay reason: ${svc.reasons.join('; ')}` : ''].filter(Boolean).join(' · '),
         fromCard: true,
       };
       runs.push(run);
@@ -513,7 +588,7 @@ function decodeDay(str) {
   };
 }
 async function shareDay() {
-  const day = settings.day; if (!day) return;
+  const day = selDay(); if (!day) return;
   const url = new URL(location.href.split('#')[0]);
   const params = new URLSearchParams({ day: encodeDay(day) });
   if (settings.relay) params.set('relay', settings.relay);
@@ -534,7 +609,8 @@ function readDayLink() {
     const day = decodeDay(d);
     const relay = h.get('relay');
     if (relay && /^https:\/\//i.test(relay) && !settings.relay) settings.relay = relay.replace(/\/+$/, '');
-    settings.day = day; settings.followDay = true;
+    settings.days[day.date] = day; settings.followDay = true;
+    dayState.selected = day.date; dayState.month = day.date.slice(0, 7);
     persistSettings();
     history.replaceState(null, '', location.pathname + location.search);
     return true;
@@ -543,7 +619,7 @@ function readDayLink() {
 
 /* ---------- Start-up ---------- */
 // Shown in Settings so we can tell which version a phone is running.
-const APP_VERSION = '2026-11-14.9';
+const APP_VERSION = '2026-11-14.10';
 (() => { const a = document.querySelector('.about'); if (a) a.insertAdjacentHTML('beforeend', `<br>Version ${APP_VERSION}`); })();
 
 stationsReady.then(() => {
