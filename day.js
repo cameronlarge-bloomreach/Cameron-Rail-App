@@ -427,7 +427,18 @@ function matchIndex(svc, crs, fromIdx = 0) {
   return -1;
 }
 
+// Kept here too, so My day works even if the phone has an older app.js cached.
+function dayServicePath(uid) {
+  return `/service?uniqueIdentity=${encodeURIComponent(String(uid).split(':').slice(-2).join(':'))}`;
+}
+
+let savingNow = false;
 async function saveFinishedLegs(legs, quiet) {
+  if (savingNow) return;
+  savingNow = true;
+  try { await saveFinishedLegsInner(legs, quiet); } finally { savingNow = false; }
+}
+async function saveFinishedLegsInner(legs, quiet) {
   let saved = 0, waiting = 0, limited = false;
   const notFound = [], errored = [];
   const todo = legs.filter(l => l && !l.runId);
@@ -441,7 +452,7 @@ async function saveFinishedLegs(legs, quiet) {
     try {
       const uid = await resolveLeg(leg, settings.day.date, onWait);
       if (!uid) { notFound.push(leg.headcode); continue; }
-      const svc = parseService(await pacedApi(serviceQuery(uid), onWait));
+      const svc = parseService(await pacedApi(dayServicePath(uid), onWait));
       const first = leg.stops[0], last = leg.stops[leg.stops.length - 1];
       const ai = matchIndex(svc, first.crs), bi = matchIndex(svc, last.crs, Math.max(ai, 0));
       const A = ai >= 0 ? svc.locs[ai] : null, B = bi >= 0 ? svc.locs[bi] : null;
@@ -460,7 +471,8 @@ async function saveFinishedLegs(legs, quiet) {
       saved++;
     } catch (err) {
       if (err && err.kind === 'ratelimit') { limited = true; break; }
-      errored.push(leg.headcode);
+      errored.push(`${leg.headcode} (${err && err.kind ? `${err.kind}${err.status ? ' ' + err.status : ''}` : (err && err.message) || 'error'})`);
+      console.error('save', leg.headcode, err);
     }
   }
   persistRuns(); persistSettings();
@@ -472,7 +484,7 @@ async function saveFinishedLegs(legs, quiet) {
     errored.length ? `${errored.join(', ')}: couldn't load, try again` : '',
     limited ? 'Live data limit reached. Wait a minute and tap Save again to finish' : '',
   ].filter(Boolean);
-  if (parts.length > 1 || limited || notFound.length) dayNotice(parts.join('. ') + '.');
+  if (parts.length > 1 || limited || notFound.length || errored.length) dayNotice(parts.join('. ') + '.');
   else toast(parts[0] || 'Nothing to save');
   renderDay();
 }
@@ -529,6 +541,10 @@ function readDayLink() {
 }
 
 /* ---------- Start-up ---------- */
+// Shown in Settings so we can tell which version a phone is running.
+const APP_VERSION = '2026-11-14.8';
+(() => { const a = document.querySelector('.about'); if (a) a.insertAdjacentHTML('beforeend', `<br>Version ${APP_VERSION}`); })();
+
 stationsReady.then(() => {
   if (readDayLink()) { show('day'); toast('Day loaded'); }
   followDayTick();
