@@ -471,6 +471,7 @@ async function saveFinishedLegsInner(legs, quiet) {
       saved++;
     } catch (err) {
       if (err && err.kind === 'ratelimit') { limited = true; break; }
+      if (err && err.kind === 'norelay') { dayState.notice = apiErrorText(err); break; }
       errored.push(`${leg.headcode} (${err && err.kind ? `${err.kind}${err.status ? ' ' + err.status : ''}` : (err && err.message) || 'error'})`);
       console.error('save', leg.headcode, err);
     }
@@ -542,7 +543,7 @@ function readDayLink() {
 
 /* ---------- Start-up ---------- */
 // Shown in Settings so we can tell which version a phone is running.
-const APP_VERSION = '2026-11-14.8';
+const APP_VERSION = '2026-11-14.9';
 (() => { const a = document.querySelector('.about'); if (a) a.insertAdjacentHTML('beforeend', `<br>Version ${APP_VERSION}`); })();
 
 stationsReady.then(() => {

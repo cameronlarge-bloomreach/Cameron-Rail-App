@@ -17,10 +17,15 @@ function save(key, value) {
   catch { toast('Could not save. Storage may be full.'); return false; }
 }
 
+// This app's own relay (not secret: the Realtime Trains token stays in Cloudflare).
+// Used whenever a phone hasn't set one, e.g. Safari vs the home-screen app.
+const DEFAULT_RELAY = 'https://right-time-relay.cameron6333.workers.dev';
+
 let runs = load(STORE_KEY, []);
 let settings = Object.assign({
-  tolerance: 0, period: 'month', relay: '', railOverlay: true, recentStations: [], tracked: null, day: null, followDay: true
+  tolerance: 0, period: 'month', relay: DEFAULT_RELAY, railOverlay: true, recentStations: [], tracked: null, day: null, followDay: true
 }, load(SETTINGS_KEY, {}));
+if (!settings.relay) settings.relay = DEFAULT_RELAY;
 const persistRuns = () => save(STORE_KEY, runs);
 const persistSettings = () => save(SETTINGS_KEY, settings);
 
