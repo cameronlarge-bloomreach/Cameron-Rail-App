@@ -1,0 +1,493 @@
+'use strict';
+/* =========================================================================
+   Right Time: "My day". Upload a job card photo, check what was read,
+   then follow every train of the shift and save each run automatically.
+   Uses globals from app.js (settings, api, STATIONS, show, startTracking…).
+   ========================================================================= */
+
+const dayState = { mode: null, draft: null, reading: null };
+
+/* ---------- Times on job cards: "0819½" ---------- */
+function cardTimeLabel(s) { return s.time ? s.time.replace(':', '') + (s.half ? '½' : '') : '—'; }
+function parseCardTime(text) {
+  const t = String(text || '').trim().replace(/\s+/g, '');
+  const m = /^(\d{1,2}):?(\d{2})(½|\.5|h|H|1\/2)?$/.exec(t);
+  if (!m || +m[1] > 23 || +m[2] > 59) return null;
+  return { time: `${pad(+m[1])}:${m[2]}`, half: !!m[3] };
+}
+const legStart = leg => leg.stops[0] && leg.stops[0].time;
+const legEnd = leg => leg.stops.length && leg.stops[leg.stops.length - 1].time;
+const legMins = (leg, which) => { const t = which === 'end' ? legEnd(leg) : legStart(leg); return t ? toMins(t) : null; };
+const stationName = s => (s.crs && STATIONS[s.crs] ? STATIONS[s.crs][0] : s.name || '?');
+const legTitle = leg => `${leg.headcode || '????'} · ${stationName(leg.stops[0] || {})} → ${stationName(leg.stops[leg.stops.length - 1] || {})}`;
+
+/* ---------- Rendering ---------- */
+function renderDay() {
+  const el = $('#day-body');
+  const day = settings.day;
+  if (dayState.mode === 'reading') return renderReading(el);
+  if (dayState.mode === 'review' && dayState.draft) return renderReview(el);
+  if (!day || !day.legs || !day.legs.length) return renderDayEmpty(el);
+  renderPlan(el, day);
+}
+
+function renderDayEmpty(el) {
+  el.innerHTML = `
+    <div class="card">
+      <h2 class="card-title">Load your job card</h2>
+      <p class="card-hint">Take a photo of the job card (or pick one from Photos). The app reads each train (headcode, stations and times), then follows them through the day and saves how early or late each one was.</p>
+      <label class="btn btn-primary full file-btn">
+        Upload job card photo
+        <input type="file" id="card-file" accept="image/*" hidden>
+      </label>
+      <button class="btn btn-ghost full" id="card-manual" style="margin-top:8px">Add trains by hand</button>
+      <p class="card-hint" style="margin-top:12px">Tips: lay the card flat in good light, fill the frame, and keep it straight. Reading happens on this phone; the photo isn't uploaded anywhere.</p>
+    </div>`;
+  $('#card-file').addEventListener('change', onCardFile);
+  $('#card-manual').addEventListener('click', () => {
+    dayState.draft = { date: todayISO(), name: '', legs: [blankLeg()] };
+    dayState.mode = 'review';
+    renderDay();
+  });
+}
+
+function renderReading(el) {
+  const r = dayState.reading || {};
+  const pct = r.total ? Math.round((r.done / r.total) * 100) : 5;
+  el.innerHTML = `
+    <div class="card">
+      <h2 class="card-title">Reading your job card…</h2>
+      <p class="card-hint">${esc(r.label || 'Getting ready')}</p>
+      <div class="progress"><span style="width:${pct}%"></span></div>
+      <p class="card-hint" style="margin-top:10px">The first time takes a little longer while the reader downloads (about 7 MB). After that it works offline.</p>
+    </div>`;
+}
+
+function blankLeg() { return { id: newId(), headcode: '', stops: [{ name: '', crs: '', time: '', half: false }, { name: '', crs: '', time: '', half: false }] }; }
+function newId() { return (crypto.randomUUID && crypto.randomUUID()) || String(Date.now()) + Math.random().toString(16).slice(2); }
+
+function renderReview(el) {
+  const d = dayState.draft;
+  const checks = d.legs.reduce((n, l) => n + l.stops.filter(s => s.check || !s.crs || !s.time).length + (/^\d[A-Z]\d\d$/.test(l.headcode) ? 0 : 1), 0);
+  el.innerHTML = `
+    <div class="card form">
+      <h2 class="card-title">Check your trains</h2>
+      <p class="card-hint">${checks ? `<strong>${checks} thing${checks === 1 ? '' : 's'} to check</strong> (highlighted). ` : 'Everything was read. '}Fix anything that's wrong, then tap <strong>Save my day</strong>.</p>
+      <div class="row">
+        <label class="field"><span>Date</span><input type="date" id="rv-date" value="${esc(d.date)}"></label>
+        <label class="field"><span>Job / diagram (optional)</span><input type="text" id="rv-name" value="${esc(d.name || '')}" placeholder="e.g. CE610"></label>
+      </div>
+    </div>
+    ${d.legs.map((leg, li) => `
+      <div class="card form leg-edit" data-leg="${li}">
+        <div class="leg-edit-head">
+          <label class="field hc-field ${/^\d[A-Z]\d\d$/.test(leg.headcode) ? '' : 'needs-check'}"><span>Headcode</span>
+            <input type="text" class="rv-hc" value="${esc(leg.headcode)}" maxlength="4" autocapitalize="characters" spellcheck="false" placeholder="1A23"></label>
+          <button type="button" class="link-btn rv-del-leg">Remove train</button>
+        </div>
+        <div class="stop-edit-head"><span>Station</span><span>Time</span><span></span></div>
+        ${leg.stops.map((s, si) => `
+          <div class="stop-edit ${s.check || !s.crs || !s.time ? 'needs-check' : ''}" data-stop="${si}">
+            <div class="stop-edit-name">
+              <input type="text" class="rv-name" value="${esc(s.crs && STATIONS[s.crs] ? STATIONS[s.crs][0] : s.name)}" placeholder="Station" autocapitalize="words" spellcheck="false">
+              <small class="rv-match">${s.crs ? `${esc(s.crs)}${s.name && STATIONS[s.crs] && s.name.toLowerCase() !== STATIONS[s.crs][0].toLowerCase() ? ` · read as “${esc(s.name)}”` : ''}` : '<span class="txt-late">Station not recognised</span>'}</small>
+            </div>
+            <input type="text" class="rv-time" inputmode="decimal" value="${esc(s.time ? cardTimeLabel(s) : '')}" placeholder="0819½">
+            <button type="button" class="icon-x rv-del-stop" aria-label="Remove stop">×</button>
+          </div>`).join('')}
+        <button type="button" class="link-btn rv-add-stop">+ Add station</button>
+      </div>`).join('')}
+    <button type="button" class="btn btn-ghost full" id="rv-add-leg">+ Add another train</button>
+    <div class="form-actions" style="margin-top:12px">
+      <button type="button" class="btn btn-primary" id="rv-save">Save my day</button>
+      <button type="button" class="btn btn-ghost" id="rv-cancel">Cancel</button>
+    </div>
+    <p class="card-hint" style="margin-top:8px">Times: type them as on the card, e.g. 0819½ (or 0819.5).</p>`;
+
+  const legOf = e => d.legs[+e.target.closest('[data-leg]').dataset.leg];
+  const stopOf = e => legOf(e).stops[+e.target.closest('[data-stop]').dataset.stop];
+  el.querySelectorAll('.rv-hc').forEach(i => i.addEventListener('change', e => { legOf(e).headcode = e.target.value.trim().toUpperCase(); renderDay(); }));
+  el.querySelectorAll('.rv-name').forEach(i => i.addEventListener('change', e => {
+    const s = stopOf(e); s.name = e.target.value.trim();
+    const leg = legOf(e);
+    const resolved = JobCard.resolveStops(leg.stops.map(x => ({ name: x === s ? s.name : (x.crs && STATIONS[x.crs] ? STATIONS[x.crs][0] : x.name) })), STATIONS);
+    s.crs = resolved[leg.stops.indexOf(s)].crs; s.check = false;
+    renderDay();
+  }));
+  el.querySelectorAll('.rv-time').forEach(i => i.addEventListener('change', e => {
+    const s = stopOf(e), p = parseCardTime(e.target.value);
+    if (p) { s.time = p.time; s.half = p.half; s.check = false; } else { s.time = ''; toast('Type the time like 0819 or 0819½'); }
+    renderDay();
+  }));
+  el.querySelectorAll('.rv-del-stop').forEach(b => b.addEventListener('click', e => { const leg = legOf(e); leg.stops.splice(+e.target.closest('[data-stop]').dataset.stop, 1); renderDay(); }));
+  el.querySelectorAll('.rv-add-stop').forEach(b => b.addEventListener('click', e => { legOf(e).stops.push({ name: '', crs: '', time: '', half: false }); renderDay(); }));
+  el.querySelectorAll('.rv-del-leg').forEach(b => b.addEventListener('click', e => { if (confirm('Remove this train?')) { d.legs.splice(+e.target.closest('[data-leg]').dataset.leg, 1); renderDay(); } }));
+  $('#rv-add-leg').addEventListener('click', () => { d.legs.push(blankLeg()); renderDay(); });
+  $('#rv-date').addEventListener('change', e => { d.date = e.target.value || todayISO(); });
+  $('#rv-name').addEventListener('change', e => { d.name = e.target.value.trim(); });
+  $('#rv-cancel').addEventListener('click', () => { dayState.mode = null; dayState.draft = null; renderDay(); });
+  $('#rv-save').addEventListener('click', saveDraft);
+}
+
+function saveDraft() {
+  const d = dayState.draft;
+  const legs = d.legs
+    .map(l => Object.assign({}, l, { stops: l.stops.filter(s => s.crs && s.time) }))
+    .filter(l => l.stops.length >= 2);
+  const bad = d.legs.filter(l => !/^\d[A-Z]\d\d$/.test(l.headcode));
+  if (!legs.length) return toast('Add at least one train with two stations and times');
+  if (bad.length && !confirm(`${bad.length} train${bad.length === 1 ? ' has' : 's have'} no valid headcode, so ${bad.length === 1 ? 'it' : 'they'} can't be tracked live. Save anyway?`)) return;
+  const dropped = d.legs.reduce((n, l) => n + l.stops.filter(s => !(s.crs && s.time)).length, 0);
+  legs.sort((a, b) => (legMins(a) ?? 0) - (legMins(b) ?? 0));
+  settings.day = { date: d.date, name: d.name || '', legs: legs.map(l => ({ id: l.id || newId(), headcode: l.headcode, stops: l.stops.map(s => ({ crs: s.crs, name: stationName(s), time: s.time, half: !!s.half })), uid: null, runId: null })) };
+  settings.followDay = true;
+  persistSettings();
+  dayState.mode = null; dayState.draft = null;
+  toast(dropped ? `Day saved (${dropped} unfinished row${dropped === 1 ? '' : 's'} left out)` : 'Day saved');
+  renderDay();
+  followDayTick();
+}
+
+function legStatus(leg, day) {
+  const now = minsSinceRunDate(day.date);
+  const s = legMins(leg), e = legMins(leg, 'end');
+  const tracking = settings.tracked && settings.tracked.legId === leg.id;
+  if (leg.runId) {
+    const r = runs.find(x => x.id === leg.runId);
+    const dd = r ? diffMins(r.schedArr, r.actArr) : null;
+    return { cls: classify(dd) || 'ontime', text: r ? `Saved · ${describe(dd)}` : 'Saved' };
+  }
+  if (tracking && live.svc && live.pos) {
+    const d = currentDelay(live.svc, live.pos);
+    return { cls: classify(d) || 'ontime', text: live.pos.kind === 'arrived' ? `Arrived · ${describe(d)}` : `Live · ${d == null ? 'on its way' : describe(d)}` };
+  }
+  if (e != null && now > e + 5) return { cls: 'ontime', text: 'Finished · tap Save' };
+  if (s != null && now >= s - 15) return { cls: 'ontime', text: 'Due now' };
+  return { cls: 'ontime', text: 'Later' };
+}
+
+function renderPlan(el, day) {
+  const isToday = day.date === todayISO();
+  const first = day.legs[0], last = day.legs[day.legs.length - 1];
+  const unsaved = day.legs.filter(l => !l.runId && /^\d[A-Z]\d\d$/.test(l.headcode) && legMins(l, 'end') != null && minsSinceRunDate(day.date) > legMins(l, 'end') + 5);
+  el.innerHTML = `
+    <div class="card">
+      <div class="plan-head">
+        <div>
+          <div class="plan-title">${esc(day.name ? `${day.name} · ` : '')}${esc(fmtDate(day.date))}</div>
+          <div class="plan-sub">${day.legs.length} train${day.legs.length === 1 ? '' : 's'} · ${esc(cardTimeLabel(first.stops[0]))}–${esc(cardTimeLabel(last.stops[last.stops.length - 1]))}</div>
+        </div>
+      </div>
+      <label class="toggle"><input type="checkbox" id="follow-day" ${settings.followDay ? 'checked' : ''} ${isToday ? '' : 'disabled'}>
+        <span>Follow my day on the map${isToday ? '' : ' (on the day)'}</span></label>
+      <p class="card-hint">${isToday ? 'The map switches to each train as the shift goes on, so it can be followed from either phone.' : 'This day is not today. Tracking starts on the day.'}</p>
+      <div class="sheet-actions">
+        <button class="btn btn-ghost" id="day-share">Share day</button>
+        <button class="btn btn-ghost" id="day-edit">Edit</button>
+        <button class="btn btn-ghost" id="day-clear">Clear</button>
+      </div>
+    </div>
+    ${unsaved.length ? `<button class="btn btn-primary full" id="day-save-all">Save ${unsaved.length} finished run${unsaved.length === 1 ? '' : 's'} to stats</button>` : ''}
+    <div class="dlegs">
+      ${day.legs.map((leg, i) => {
+        const st = legStatus(leg, day);
+        const tracking = settings.tracked && settings.tracked.legId === leg.id;
+        return `<div class="dleg ${tracking ? 'dleg-live' : ''}" data-id="${esc(leg.id)}">
+          <div class="dleg-top">
+            <span class="dleg-hc">${esc(leg.headcode || '????')}</span>
+            <span class="dleg-route">${esc(stationName(leg.stops[0]))} → ${esc(stationName(leg.stops[leg.stops.length - 1]))}</span>
+          </div>
+          <div class="dleg-times">${esc(cardTimeLabel(leg.stops[0]))} – ${esc(cardTimeLabel(leg.stops[leg.stops.length - 1]))} · ${leg.stops.length} stops</div>
+          <div class="dleg-bottom">
+            <span class="pill pill-${st.cls}">${esc(st.text)}</span>
+            <span class="dleg-btns">
+              ${/^\d[A-Z]\d\d$/.test(leg.headcode) ? `<button class="chip dleg-track">${tracking ? 'On map' : 'Track'}</button>` : ''}
+              ${!leg.runId && /^\d[A-Z]\d\d$/.test(leg.headcode) ? '<button class="chip dleg-save">Save run</button>' : ''}
+            </span>
+          </div>
+        </div>`;
+      }).join('')}
+    </div>`;
+
+  $('#follow-day').addEventListener('change', e => { settings.followDay = e.target.checked; persistSettings(); if (settings.followDay) followDayTick(); });
+  $('#day-edit').addEventListener('click', () => {
+    dayState.draft = JSON.parse(JSON.stringify({ date: day.date, name: day.name, legs: day.legs }));
+    dayState.mode = 'review'; renderDay();
+  });
+  $('#day-clear').addEventListener('click', () => {
+    if (!confirm('Clear this day? Saved runs stay in your stats.')) return;
+    if (settings.tracked && settings.tracked.legId) stopTracking();
+    settings.day = null; persistSettings(); renderDay();
+  });
+  $('#day-share').addEventListener('click', shareDay);
+  const sa = $('#day-save-all'); if (sa) sa.addEventListener('click', () => saveFinishedLegs(unsaved));
+  el.querySelectorAll('.dleg-track').forEach(b => b.addEventListener('click', e => trackLeg(legById(e.target.closest('.dleg').dataset.id), true)));
+  el.querySelectorAll('.dleg-save').forEach(b => b.addEventListener('click', e => saveFinishedLegs([legById(e.target.closest('.dleg').dataset.id)])));
+}
+const legById = id => settings.day && settings.day.legs.find(l => l.id === id);
+
+/* ---------- Upload & read ---------- */
+async function onCardFile(e) {
+  const file = e.target.files && e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+  dayState.mode = 'reading'; dayState.reading = { label: 'Opening photo', done: 0, total: 0 };
+  renderDay();
+  try {
+    const legs = await readJobCard(file, (label, done, total) => { dayState.reading = { label, done, total }; renderDay(); });
+    if (!legs.length) {
+      toast("Couldn't find any trains on that photo. Try again closer and flatter, or add them by hand.");
+      dayState.mode = null; renderDay(); return;
+    }
+    dayState.draft = { date: todayISO(), name: '', legs };
+    dayState.mode = 'review';
+  } catch (err) {
+    console.error(err);
+    toast('Something went wrong reading the photo. Try again, or add trains by hand.');
+    dayState.mode = null;
+  }
+  renderDay();
+}
+
+let ocrWorker = null;
+function loadScript(src) {
+  return new Promise((res, rej) => { const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = rej; document.head.appendChild(s); });
+}
+async function getOcr(progress) {
+  if (ocrWorker) return ocrWorker;
+  progress('Downloading the reader (first time only)', 0, 0);
+  if (!window.Tesseract) await loadScript('vendor/tesseract/tesseract.min.js');
+  const base = new URL('vendor/tesseract/', location.href).href;
+  ocrWorker = await Tesseract.createWorker('eng', 1 /* LSTM only */, {
+    workerPath: base + 'worker.min.js',
+    corePath: base,
+    langPath: base.replace(/\/$/, ''),
+    gzip: true,
+  });
+  return ocrWorker;
+}
+
+function toCanvas(img) {
+  const c = document.createElement('canvas');
+  c.width = img.width; c.height = img.height;
+  c.getContext('2d').putImageData(new ImageData(img.data, img.width, img.height), 0, 0);
+  return c;
+}
+
+async function readJobCard(file, progress) {
+  await stationsReady;
+  // Load the photo (Safari applies the camera's rotation automatically).
+  const url = URL.createObjectURL(file);
+  const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
+  const scale = Math.min(1, 2000 / Math.max(img.naturalWidth, img.naturalHeight));
+  const W = Math.round(img.naturalWidth * scale), H = Math.round(img.naturalHeight * scale);
+  const canvas = document.createElement('canvas'); canvas.width = W; canvas.height = H;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(img, 0, 0, W, H);
+  URL.revokeObjectURL(url);
+  const rgba = ctx.getImageData(0, 0, W, H).data;
+
+  const worker = await getOcr(progress);
+  const bars = JobCardImage.findYellowBars(rgba, W, H);
+
+  if (!bars.length) {
+    // No yellow headers: read the whole page and look for station/time columns.
+    progress('Reading the page', 0, 1);
+    await worker.setParameters({ tessedit_pageseg_mode: '11', tessedit_char_whitelist: '' });
+    const { data } = await worker.recognize(canvas, {}, { blocks: true });
+    const words = [];
+    for (const b of data.blocks || []) for (const p of b.paragraphs) for (const l of p.lines) for (const w of l.words) words.push({ t: w.text, ...w.bbox });
+    return JobCard.parseWords(words).map(t => ({
+      id: newId(), headcode: t.headcode,
+      stops: JobCard.resolveStops(JobCard.fixTimes(t.stops.map(s => ({ name: s.name, digits: s.time.replace(':', ''), half: s.half }))), STATIONS),
+    }));
+  }
+
+  const slope = JobCardImage.estimateSkew(rgba, W, H, bars);
+  const regions = JobCardImage.tableRegions(bars, W, H);
+  const legs = [];
+  for (const [i, r] of regions.entries()) {
+    progress(`Reading train ${i + 1} of ${regions.length}`, i, regions.length);
+    await worker.setParameters({ tessedit_pageseg_mode: '7', tessedit_char_whitelist: '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ ' });
+    const head = JobCardImage.despeckle(JobCardImage.maskImage(rgba, W, r.text, 3, slope, H));
+    const headText = (await worker.recognize(toCanvas(JobCardImage.padCrop(head, 0, head.height, 20)))).data.text;
+
+    await worker.setParameters({ tessedit_pageseg_mode: '7', tessedit_char_whitelist: '' });
+    const body = JobCardImage.bodyImage(rgba, W, r.body, 2, slope, H);
+    const lines = [];
+    for (const b of JobCardImage.textBands(body)) {
+      const grey = JobCardImage.padCrop(body, b.y0, b.y1, 16);
+      let text = (await worker.recognize(toCanvas(JobCardImage.binarize(grey)))).data.text.trim();
+      if (!/\d{3}/.test(text)) {
+        const t2 = (await worker.recognize(toCanvas(grey))).data.text.trim();
+        if (/\d{3}/.test(t2)) text = t2;
+      }
+      lines.push(text);
+    }
+    const stops = JobCard.resolveStops(JobCard.fixTimes(JobCardImage.parseTableText(lines.join('\n'))), STATIONS);
+    if (stops.length) legs.push({ id: newId(), headcode: JobCard.findHeadcode(headText) || '', stops });
+  }
+  progress('Done', regions.length, regions.length);
+  legs.sort((a, b) => (legMins(a) ?? 1e9) - (legMins(b) ?? 1e9));
+  return legs;
+}
+
+/* ---------- Finding each train in the live data ---------- */
+async function resolveLeg(leg, date) {
+  if (leg.uid) return leg.uid;
+  const tries = [];
+  const first = leg.stops[0], last = leg.stops[leg.stops.length - 1];
+  const startMins = legMins(leg) ?? 0;
+  const from = m => { const v = Math.max(0, Math.round(m)); return `${date}T${pad(Math.floor(v / 60) % 24)}:${pad(v % 60)}`; };
+  tries.push({ code: first.crs, timeFrom: from(startMins - 20) });
+  if (last && last.crs) tries.push({ code: last.crs, timeFrom: from((legMins(leg, 'end') ?? startMins) - 30) });
+  for (const t of tries) {
+    const data = await api(`/location?code=${encodeURIComponent(t.code)}&timeFrom=${encodeURIComponent(t.timeFrom)}`);
+    const hit = ((data && data.services) || []).find(s => s.scheduleMetadata && s.scheduleMetadata.trainReportingIdentity === leg.headcode);
+    if (hit) {
+      leg.uid = hit.scheduleMetadata.uniqueIdentity;
+      persistSettings();
+      return leg.uid;
+    }
+  }
+  return null;
+}
+
+async function trackLeg(leg, navigate) {
+  if (!leg || !settings.day) return;
+  try {
+    const uid = await resolveLeg(leg, settings.day.date);
+    if (!uid) { toast(`Couldn't find ${leg.headcode} in the live data yet`); return; }
+    startTracking(uid, settings.day.date, { legId: leg.id, navigate });
+  } catch (err) {
+    toast(apiErrorText(err));
+  }
+}
+
+/* Which leg should be on the map right now? The current one until it has
+   arrived, then the next one from an hour before it starts. */
+function legForNow(day) {
+  const now = minsSinceRunDate(day.date);
+  const trackable = day.legs.filter(l => /^\d[A-Z]\d\d$/.test(l.headcode) && legMins(l) != null)
+    .sort((a, b) => legMins(a) - legMins(b));
+  const cur = settings.tracked && trackable.find(l => l.id === settings.tracked.legId);
+  if (cur) {
+    const arrived = live.svc && live.pos && live.pos.kind === 'arrived';
+    if (!arrived && now < legMins(cur, 'end') + 45) return cur;
+    const next = trackable.find(l => legMins(l) > legMins(cur));
+    if (next && now >= legMins(next) - 60) return next;
+    return cur;
+  }
+  return trackable.find(l => now >= legMins(l) - 20 && now <= legMins(l, 'end') + 30)
+    || trackable.find(l => now < legMins(l) && now >= legMins(l) - 60)
+    || null;
+}
+
+let followBusy = false;
+async function followDayTick() {
+  const day = settings.day;
+  if (!day || !settings.followDay || day.date !== todayISO() || followBusy) return;
+  followBusy = true;
+  try {
+    // Save the train that has just arrived (once).
+    const cur = settings.tracked && legById(settings.tracked.legId);
+    if (cur && !cur.runId && live.svc && live.pos && live.pos.kind === 'arrived') await saveFinishedLegs([cur], true);
+    const leg = legForNow(day);
+    if (leg && !(settings.tracked && settings.tracked.legId === leg.id)) await trackLeg(leg, false);
+  } finally { followBusy = false; }
+  if (currentView === 'day') renderDay();
+}
+setInterval(() => { if (document.visibilityState === 'visible') followDayTick(); }, 60000);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') followDayTick(); });
+
+/* ---------- Saving runs from the day ---------- */
+function matchIndex(svc, crs, fromIdx = 0) {
+  for (let i = fromIdx; i < svc.locs.length; i++) if (svc.locs[i].crs === crs) return i;
+  return -1;
+}
+
+async function saveFinishedLegs(legs, quiet) {
+  let saved = 0, waiting = 0, failed = 0;
+  for (const leg of legs) {
+    if (!leg || leg.runId) continue;
+    try {
+      const uid = await resolveLeg(leg, settings.day.date);
+      if (!uid) { failed++; continue; }
+      const svc = parseService(await api(`/service?uniqueIdentity=${encodeURIComponent(uid)}`));
+      const first = leg.stops[0], last = leg.stops[leg.stops.length - 1];
+      const ai = matchIndex(svc, first.crs), bi = matchIndex(svc, last.crs, Math.max(ai, 0));
+      const A = ai >= 0 ? svc.locs[ai] : null, B = bi >= 0 ? svc.locs[bi] : null;
+      if (!B || !B.aArr) { waiting++; continue; }
+      const run = {
+        id: newId(), createdAt: Date.now(), serviceUid: uid, date: settings.day.date, headcode: leg.headcode,
+        from: stationName(first), to: stationName(last),
+        // Booked times come from the job card (the working timetable she drives to).
+        schedDep: first.time, actDep: A && A.aDep ? hhmm(A.rDep) : '',
+        schedArr: last.time, actArr: hhmm(B.rArr),
+        reason: '', notes: [settings.day.name ? `Job ${settings.day.name}` : '', svc.reasons && svc.reasons.length ? `Official delay reason: ${svc.reasons.join('; ')}` : ''].filter(Boolean).join(' · '),
+        fromCard: true,
+      };
+      runs.push(run);
+      leg.runId = run.id;
+      saved++;
+    } catch (err) {
+      failed++;
+      if (err && err.kind === 'ratelimit') break;
+    }
+  }
+  persistRuns(); persistSettings();
+  if (quiet && !saved) return;
+  toast([saved ? `Saved ${saved} run${saved === 1 ? '' : 's'}` : '', waiting ? `${waiting} not arrived yet` : '', failed ? `${failed} couldn't be found` : ''].filter(Boolean).join(' · ') || 'Nothing to save');
+  renderDay();
+}
+
+/* ---------- Sharing a day between phones ---------- */
+function encodeDay(day) {
+  const compact = { d: day.date, n: day.name || '', l: day.legs.map(l => [l.headcode, l.stops.map(s => [s.crs, s.time.replace(':', '') + (s.half ? 'h' : '')])]) };
+  return btoa(unescape(encodeURIComponent(JSON.stringify(compact)))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function decodeDay(str) {
+  const json = decodeURIComponent(escape(atob(str.replace(/-/g, '+').replace(/_/g, '/'))));
+  const c = JSON.parse(json);
+  return {
+    date: c.d, name: c.n || '',
+    legs: c.l.map(([hc, stops]) => ({
+      id: newId(), headcode: hc, uid: null, runId: null,
+      stops: stops.map(([crs, t]) => ({ crs, name: STATIONS[crs] ? STATIONS[crs][0] : crs, time: `${t.slice(0, 2)}:${t.slice(2, 4)}`, half: t.endsWith('h') })),
+    })),
+  };
+}
+async function shareDay() {
+  const day = settings.day; if (!day) return;
+  const url = new URL(location.href.split('#')[0]);
+  const params = new URLSearchParams({ day: encodeDay(day) });
+  if (settings.relay) params.set('relay', settings.relay);
+  url.hash = params.toString();
+  const text = `${day.name ? day.name + ' · ' : ''}${fmtDate(day.date)}: follow the trains live`;
+  if (navigator.share) {
+    try { await navigator.share({ title: 'Right Time', text, url: url.toString() }); return; }
+    catch (e) { if (e.name === 'AbortError') return; }
+  }
+  try { await navigator.clipboard.writeText(url.toString()); toast('Link copied'); }
+  catch { prompt('Copy this link:', url.toString()); }
+}
+function readDayLink() {
+  const h = new URLSearchParams(location.hash.slice(1));
+  const d = h.get('day');
+  if (!d) return false;
+  try {
+    const day = decodeDay(d);
+    const relay = h.get('relay');
+    if (relay && /^https:\/\//i.test(relay) && !settings.relay) settings.relay = relay.replace(/\/+$/, '');
+    settings.day = day; settings.followDay = true;
+    persistSettings();
+    history.replaceState(null, '', location.pathname + location.search);
+    return true;
+  } catch { toast("That day link couldn't be read"); return false; }
+}
+
+/* ---------- Start-up ---------- */
+stationsReady.then(() => {
+  if (readDayLink()) { show('day'); toast('Day loaded'); }
+  followDayTick();
+});
