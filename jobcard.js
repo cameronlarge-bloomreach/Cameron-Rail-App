@@ -134,10 +134,17 @@
   const KNOWN = {
     'new st': 'BHM', 'new street': 'BHM', 'bham new st': 'BHM', 'bham': 'BHM', 'snow hill': 'BSW', 'moor st': 'BMO', 'intl': 'BHI', 'bham intl': 'BHI',
     'lime st': 'LIV', 'liv lime st': 'LIV', 'liv spkwy': 'LPY', 'liv s pkwy': 'LPY', 'spkwy': 'LPY',
-    'smeth gb': 'SGB', 'smeth': 'SGB', 'smeth rolfe st': 'SMR', 'wolvrhptn': 'WVH', 'wolves': 'WVH', 'actonbdge': 'ACB',
+    'smeth gb': 'SGB', 'smeth': 'SGB', 'smeth rs': 'SMR', 'smethrs': 'SMR', 'tamebrpw': 'TAB', 'tame br pw': 'TAB', 'tame bridge': 'TAB',
+    'perrybarr': 'PRY', 'dudley po': 'DDP', 'dudleypo': 'DDP', 'dudley port': 'DDP', 'sandwell': 'SAD', 'bescot': 'BSC', 'coseley': 'CSY', 'duddeston': 'DUD',
+    'hamstead': 'HSD', 'witton': 'WTT', 'aston': 'AST', 'tipton': 'TIP', 'walsall': 'WSL', 'snow hill': 'BSW', 'moor st': 'BMO', 'b ham intl': 'BHI', 'smeth rolfe st': 'SMR', 'wolvrhptn': 'WVH', 'wolves': 'WVH', 'actonbdge': 'ACB',
     'stoke': 'SOT', 'euston': 'EUS', 'mk': 'MKC', 'milton keynes': 'MKC', 'mkc': 'MKC', 'nton': 'NMP', 'northampton': 'NMP',
     'picc': 'MAN', 'man picc': 'MAN', 'manchester picc': 'MAN', 'stafford': 'STA', 'stone': 'SNE', 'crewe': 'CRE',
   };
+
+  // Stations on West Midlands Trains lines (West Midlands Railway + London
+  // Northwestern Railway). Names read from a job card are matched against
+  // these first, so partly-read names still find the right station.
+  const NETWORK = new Set(["ACB", "ACG", "ADD", "ALB", "ALV", "APG", "APS", "ASG", "AST", "ATH", "BBK", "BBS", "BDM", "BEH", "BEP", "BER", "BHI", "BHM", "BKD", "BKM", "BKT", "BKW", "BLX", "BLY", "BMO", "BMV", "BRV", "BSC", "BSH", "BSJ", "BSW", "BTG", "BUL", "BWB", "BWN", "CAA", "CAO", "CED", "CLV", "CNL", "COS", "COV", "CRA", "CRD", "CRE", "CSL", "CSY", "CWL", "DAS", "DDG", "DDP", "DTW", "DUD", "DZY", "ERD", "EUS", "EWD", "FEN", "FOK", "FWY", "GMV", "GVH", "HAG", "HBY", "HFD", "HIA", "HLG", "HML", "HNF", "HNL", "HRW", "HSD", "HTF", "HTN", "JEQ", "KDG", "KGL", "KID", "KIH", "KMH", "KNN", "KNW", "LAW", "LBK", "LBZ", "LED", "LEH", "LGG", "LIC", "LID", "LIV", "LMS", "LOB", "LPT", "LPW", "LPY", "LTV", "LYE", "MGN", "MKC", "MLB", "MOV", "MVL", "NFD", "NMP", "NUN", "OHL", "OKN", "OLT", "PIR", "PKG", "PRY", "PSW", "RDC", "RGL", "RGT", "RID", "ROW", "RUG", "RUN", "SAD", "SAV", "SBJ", "SBT", "SCF", "SEN", "SFN", "SGB", "SHR", "SLY", "SMA", "SMR", "SNE", "SOL", "SOT", "SRI", "SRL", "STA", "STY", "SUT", "SWR", "TAB", "TAM", "TFC", "THL", "THW", "TIP", "TLK", "TRI", "TYS", "UNI", "WDE", "WFJ", "WIA", "WLN", "WMB", "WMC", "WMR", "WOB", "WOF", "WOL", "WOP", "WOS", "WRP", "WRW", "WSF", "WSL", "WTE", "WTT", "WVH", "WWW", "WYL", "WYT", "YRD"]);
 
   const KNOWN_LETTERS = Object.fromEntries(Object.entries(KNOWN).map(([k, v]) => [k.replace(/[^a-z]/g, ''), v]));
 
@@ -158,7 +165,8 @@
     const nk = n.replace(/\./g, '').trim();
     const known = KNOWN_LETTERS[nk.replace(/[^a-z]/g, '')];
     if (known && stations[known]) return [{ crs: known, score: 100 }];
-    if (/^[a-z]{3}$/.test(nk) && stations[nk.toUpperCase()]) return [{ crs: nk.toUpperCase(), score: 90 }];
+    // A 3-letter station code, only if written in capitals ("CRE"), not a fragment like "ewe".
+    if (/^[A-Z]{3}$/.test(String(name).trim()) && stations[nk.toUpperCase()]) return [{ crs: nk.toUpperCase(), score: 90 }];
     const tokens = nk.split(' ').flatMap(t => (EXPAND[t] || t).split(' '));
     const out = [];
     for (const [crs, [full]] of Object.entries(stations)) {
@@ -240,23 +248,66 @@
     return [...out.entries()].map(([crs, score]) => ({ crs, score })).sort((a, b) => b.score - a.score).slice(0, 8);
   }
 
+  /* Match a (possibly partly read) name against network stations only. */
+  function networkCandidates(name, stations) {
+    const q = norm(name).replace(/[^a-z]/g, '');
+    if (q.length < 3) return [];
+    const out = [];
+    for (const crs of NETWORK) {
+      if (!stations[crs]) continue;
+      const f = norm(stations[crs][0]).replace(/[^a-z]/g, '');
+      const firstWord = norm(stations[crs][0]).split(' ')[0].replace(/[^a-z]/g, '');
+      let score = 0;
+      if (q === f || q === firstWord) score = 95;
+      else if (f.endsWith(q) && q.length >= 3) score = 62 + q.length;           // start cut off ("ewe")
+      else if (firstWord.endsWith(q) && q.length >= 3) score = 60 + q.length;
+      else if ((f.startsWith(q) || firstWord.startsWith(q)) && q.length >= 4) score = 64 + q.length; // end cut off
+      else {
+        const d = Math.min(lev(q, f), lev(q, firstWord));
+        const L = Math.max(4, Math.min(f.length, q.length));
+        if (d <= Math.max(1, Math.floor(L * 0.4))) score = 78 - d * 7;
+        else if (q.length >= 4 && q[0] === f[0] && isSubseq(q, f)) score = 60;  // shorthand ("wolvrhptn")
+        else {
+          // Junk in front: compare the end of what was read with the name.
+          const tail = q.slice(-f.length), dt = lev(tail, f);
+          if (q.length > f.length && f.length >= 4 && dt <= 1) score = 70 - dt * 6;
+        }
+      }
+      if (score) out.push({ crs, score });
+    }
+    return out.sort((a, b) => b.score - a.score).slice(0, 6);
+  }
+
   /* Resolve every stop to a CRS, using neighbouring stops to pick between
      look-alikes (e.g. "Stoke" → Stoke-on-Trent when next to Kidsgrove). */
   function resolveStops(stops, stations) {
-    const cands = stops.map(s => candidates(s.name, stations));
+    const cands = stops.map(s => {
+      const all = candidates(s.name, stations).map(c => ({ crs: c.crs, score: c.score + (NETWORK.has(c.crs) ? 15 : 0) }));
+      for (const n of networkCandidates(s.name, stations)) {
+        const e = all.find(a => a.crs === n.crs);
+        if (e) e.score = Math.max(e.score, n.score + 15); else all.push({ crs: n.crs, score: n.score + 15 });
+      }
+      return all.sort((a, b) => b.score - a.score);
+    });
     const pick = cands.map(c => (c.length && (c.length === 1 || c[0].score - c[1].score >= 8)) ? c[0].crs : null);
     for (let pass = 0; pass < 2; pass++) {
       cands.forEach((c, i) => {
         if (pick[i] || !c.length) return;
-        const near = [];
-        for (let k = 1; k <= 3; k++) { if (pick[i - k]) near.push(stations[pick[i - k]]); if (pick[i + k]) near.push(stations[pick[i + k]]); }
-        if (!near.length) { if (pass === 1) pick[i] = c[0].crs; return; }
-        const top = c.filter(x => x.score >= c[0].score - 12);
-        top.sort((a, b) => {
-          const da = Math.min(...near.map(p => haversineKm([p[1], p[2]], [stations[a.crs][1], stations[a.crs][2]])));
-          const db = Math.min(...near.map(p => haversineKm([p[1], p[2]], [stations[b.crs][1], stations[b.crs][2]])));
-          return da - db;
-        });
+        // Nearest resolved stops before and after this one.
+        let prev = null, next = null;
+        for (let k = i - 1; k >= 0; k--) if (pick[k]) { prev = pick[k]; break; }
+        for (let k = i + 1; k < stops.length; k++) if (pick[k]) { next = pick[k]; break; }
+        if (!prev && !next) { if (pass === 1) pick[i] = c[0].crs; return; }
+        // A train doesn't call at the same station twice in a row.
+        let top = c.filter(x => x.score >= c[0].score - 12 && x.crs !== pick[i - 1] && x.crs !== pick[i + 1]);
+        if (!top.length) top = c.slice(0, 1);
+        // Best fit on the route: shortest detour from the stop before to the stop after.
+        const pos = crs => [stations[crs][1], stations[crs][2]];
+        const cost = x => {
+          const p = pos(x.crs);
+          return (prev ? haversineKm(pos(prev), p) : 0) + (next ? haversineKm(p, pos(next)) : 0) - x.score * 0.05;
+        };
+        top.sort((a, b) => cost(a) - cost(b));
         pick[i] = top[0].crs;
       });
     }
@@ -271,8 +322,8 @@
     const toMins = d => (/^\d{4}$/.test(d) && +d.slice(0, 2) < 24 && +d.slice(2) < 60) ? +d.slice(0, 2) * 60 + +d.slice(2) : null;
     const res = stops.map(s => ({ name: s.name, digits: s.digits || '', half: !!s.half, mins: toMins(s.digits || ''), check: false }));
     const fits = (i, m) => {
-      for (let k = i - 1; k >= 0; k--) if (res[k].mins != null) { if (m < res[k].mins || m - res[k].mins > 120 * (i - k)) return false; break; }
-      for (let k = i + 1; k < res.length; k++) if (res[k].mins != null) { if (m > res[k].mins || res[k].mins - m > 120 * (k - i)) return false; break; }
+      for (let k = i - 1; k >= 0; k--) if (res[k].mins != null) { if (m < res[k].mins || m - res[k].mins > 50 * (i - k)) return false; break; }
+      for (let k = i + 1; k < res.length; k++) if (res[k].mins != null) { if (m > res[k].mins || res[k].mins - m > 50 * (k - i)) return false; break; }
       return true;
     };
     // Out-of-order times are misreads too.
@@ -302,7 +353,16 @@
     return res.map(r => ({ name: r.name, time: r.mins != null ? `${pad(Math.floor(r.mins / 60))}:${pad(r.mins % 60)}` : '', half: r.half, check: r.check }));
   }
 
-  const api = { parseTime, findHeadcode, parseWords, candidates, resolveStops, fixTimes };
+  /* How well a read name matches a station (higher is better; 0 = nothing). */
+  function nameScore(name, stations) {
+    const clean = String(name || '').replace(/(.)\1{2,}/g, '$1').replace(/[^A-Za-z. ]+/g, ' ').trim();
+    if (clean.replace(/[^A-Za-z]/g, '').length < 3) return 0;
+    const c = candidates(clean, stations).map(x => x.score + (NETWORK.has(x.crs) ? 15 : 0));
+    const n = networkCandidates(clean, stations).map(x => x.score + 15);
+    return Math.max(0, ...c, ...n);
+  }
+
+  const api = { parseTime, findHeadcode, parseWords, candidates, resolveStops, fixTimes, nameScore };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.JobCard = api;
 })(typeof window !== 'undefined' ? window : globalThis);

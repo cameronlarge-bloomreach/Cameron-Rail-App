@@ -460,3 +460,7 @@ details.timeset[open] summary { margin-bottom: 10px; color: var(--text); }
 .cal-key span { display: inline-flex; align-items: center; gap: 5px; }
 .cal-key-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; }
 #day-detail { margin-top: 4px; }
+
+.tt-badge { font-size: 13px; font-weight: 600; margin: 0 0 8px; padding: 6px 9px; border-radius: 8px; }
+.tt-ok { background: color-mix(in srgb, #0ca30c 14%, transparent); color: var(--good-text); }
+.tt-no { background: color-mix(in srgb, #fab219 22%, transparent); color: var(--text); }
